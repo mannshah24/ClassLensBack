@@ -186,6 +186,12 @@ def send_otp(request, *args, **kwargs):
         teacher = Teacher.objects.filter(email=email).first()
         student = None if teacher else Student.objects.filter(email=email).first()
 
+        if not (teacher or student):
+            return Response(
+                {"detail": "No user found with this email"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
         if teacher is not None:
             if teacher.password_hash is not None:
                 print("Password is not None")
@@ -196,15 +202,9 @@ def send_otp(request, *args, **kwargs):
 
         cache.set(email, otp, 600)
 
-        print('OPT:', otp)
+        print('OTP:', otp)
 
         display_name = teacher.name if teacher else student.name
-
-        if not (teacher or student):
-            return Response(
-                {"detail": "No user found with this email"},
-                status=status.HTTP_404_NOT_FOUND,
-            )
             
         
 
