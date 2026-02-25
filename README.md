@@ -3,11 +3,11 @@
 ClassLens Backend is the core AI and data layer of the ClassLens ecosystem.  
 It powers:
 
-- Face detection & enhancement  
-- Embedding generation & vector similarity search  
-- Attendance creation & analytics  
-- Secure authentication and OTP flows  
-- APIs for the Flutter app and Next.js admin dashboard  
+- Face detection & enhancement
+- Embedding generation & vector similarity search
+- Attendance creation & analytics
+- Secure authentication and OTP flows
+- APIs for the Flutter app and Next.js admin dashboard
 
 This repository contains the Django project, Celery configuration, and all REST APIs.
 
@@ -47,13 +47,13 @@ ClassLens/
 
 ## 🛠 Tech Stack
 
-- **Backend Framework**: Django, Django REST Framework  
-- **Task Queue**: Celery  
-- **Message Broker / Cache**: Redis  
-- **Database**: PostgreSQL (with `pgvector` extension)  
-- **Face Pipeline**: DeepFace, RetinaFace, GFPGAN  
-- **Auth & OTP**: JWT authentication + Azure Communication Services  
-- **Environment**: `.env`-driven configuration  
+- **Backend Framework**: Django, Django REST Framework
+- **Task Queue**: Celery
+- **Message Broker / Cache**: Redis
+- **Database**: PostgreSQL (with `pgvector` extension)
+- **Face Pipeline**: DeepFace, RetinaFace, GFPGAN
+- **Auth & OTP**: JWT authentication + Email OTP verification
+- **Environment**: `.env`-driven configuration
 
 ---
 
@@ -61,9 +61,9 @@ ClassLens/
 
 ### ⭐ Prerequisites
 
-- Python 3.10+  
+- Python 3.10+
 - PostgreSQL 13+ (local or managed, with pgvector installed)
-- Redis server  
+- Redis server
 - Virtual environment (recommended)
 
 ---
@@ -107,8 +107,11 @@ DB_PORT=5432
 # Redis
 REDIS_URL=redis://localhost:6379
 
-# Azure OTP / Email
-CONNECTION_STRING=your_azure_connection_string
+# Email Configuration (SMTP)
+EMAIL_HOST=smtp.gmail.com  # Use smtp-mail.outlook.com for Outlook
+EMAIL_PORT=587
+EMAIL_HOST_USER=your-email@gmail.com
+EMAIL_HOST_PASSWORD=your-app-password  # Use App Password for Gmail
 
 # Optional: model paths
 GFPGAN_MODEL_PATH=/path/to/GFPGANv1.4.pth
@@ -147,6 +150,7 @@ Backend now runs at:
 👉 http://127.0.0.1:8000/
 
 You can now hit the API from:
+
 - Flutter App (ClassLens_App)
 - Next.js admin (ClassLens-Frontend)
 
@@ -176,8 +180,9 @@ This repo uses **GFPGANv1.4** for recovering/enhancing low-quality faces before 
 Because the GFPGAN model file is large, it is not included in this repository.
 
 ### To Configure GFPGAN:
-1. Download GFPGANv1.4.pth from official repo  
-2. Place it locally (e.g., `models/GFPGANv1.4.pth`)  
+
+1. Download GFPGANv1.4.pth from official repo
+2. Place it locally (e.g., `models/GFPGANv1.4.pth`)
 3. Set `.env` key:
 
 ```
@@ -190,61 +195,60 @@ Your pipeline can then load it dynamically.
 
 ## 🔄 Backend Flow
 
-1. Teacher uploads a classroom photo from the mobile app.  
-2. Backend creates a class session and enqueues a Celery task. 
+1. Teacher uploads a classroom photo from the mobile app.
+2. Backend creates a class session and enqueues a Celery task.
 3. Celery Worker:
    - detects all faces
    - optionally enhances crops via GFPGAN
    - generates embeddings (e.g. Facenet512)
-   - runs vector similarity search (pgvector) 
+   - runs vector similarity search (pgvector)
 4. Attendance records are created for matched students.
-5. Annotated image + results are sent back to teacher for verification. 
+5. Annotated image + results are sent back to teacher for verification.
 
 ---
 
 ## 📚 API Overview (Selected Endpoints)
 
-###  Onboarding & Authentication
+### Onboarding & Authentication
 
-| Method | Endpoint           | Description                                      |
-|--------|--------------------|--------------------------------------------------|
-| GET    | `/getDepartments/` | Fetch list of departments for registration form |
-| POST   | `/registerNewStudent` | Register a new student with basic details    |
-| POST   | `/registerNewTeacher` | Register a new teacher                       |
-| POST   | `/sendOtp`         | Send OTP to email using Azure Communication     |
-| POST   | `/verifyOtp`       | Verify OTP during registration / login          |
-| POST   | `/setPassword`     | Set or reset account password                   |
-| GET    | `/verifyEmail`     | Verify whether an email is already registered   |
-| GET    | `/verifyPRN`       | Verify whether a PRN exists / is valid          |
-| GET    | `/validateStudent` | Validate student credentials / status           |
-| GET    | `/validateTeacher` | Validate teacher credentials / status           |
+| Method | Endpoint              | Description                                     |
+| ------ | --------------------- | ----------------------------------------------- |
+| GET    | `/getDepartments/`    | Fetch list of departments for registration form |
+| POST   | `/registerNewStudent` | Register a new student with basic details       |
+| POST   | `/registerNewTeacher` | Register a new teacher                          |
+| POST   | `/sendOtp`            | Send OTP to email via SMTP                      |
+| POST   | `/verifyOtp`          | Verify OTP during registration / login          |
+| POST   | `/setPassword`        | Set or reset account password                   |
+| GET    | `/verifyEmail`        | Verify whether an email is already registered   |
+| GET    | `/verifyPRN`          | Verify whether a PRN exists / is valid          |
+| GET    | `/validateStudent`    | Validate student credentials / status           |
+| GET    | `/validateTeacher`    | Validate teacher credentials / status           |
 
 > **Note:** Most registration / OTP routes are designed to be hit from the Flutter app.
 
 ---
 
-###  Subjects & Metadata
+### Subjects & Metadata
 
-| Method | Endpoint              | Description                                  |
-|--------|-----------------------|----------------------------------------------|
-| GET    | `/getSubjectDetails`  | Get subject details for a specific student   |
-| GET    | `/getSubjects/`       | Get subjects assigned to a teacher           |
-| GET    | `/teacherProfile/<int:teacher_id>/` | Fetch teacher profile + summary data |
+| Method | Endpoint                            | Description                                |
+| ------ | ----------------------------------- | ------------------------------------------ |
+| GET    | `/getSubjectDetails`                | Get subject details for a specific student |
+| GET    | `/getSubjects/`                     | Get subjects assigned to a teacher         |
+| GET    | `/teacherProfile/<int:teacher_id>/` | Fetch teacher profile + summary data       |
 
 ---
 
-###  Attendance Workflow
+### Attendance Workflow
 
-| Method | Endpoint                               | Description                                                  |
-|--------|----------------------------------------|--------------------------------------------------------------|
-| POST   | `/markAttendance`                      | Upload classroom photo and trigger attendance processing     |
-| GET    | `/attendanceStatus/<str:task_id>/`     | Poll the status of an attendance processing Celery task      |
-| GET    | `/students/attendance/`                | Get attendance details for a given student                   |
-| GET    | `/getPresentAbsentList/`               | Fetch present/absent list for a particular session           |
-| POST   | `/changeAttendance/`                   | Manually change attendance (e.g., correct misclassified student) |
+| Method | Endpoint                           | Description                                                      |
+| ------ | ---------------------------------- | ---------------------------------------------------------------- |
+| POST   | `/markAttendance`                  | Upload classroom photo and trigger attendance processing         |
+| GET    | `/attendanceStatus/<str:task_id>/` | Poll the status of an attendance processing Celery task          |
+| GET    | `/students/attendance/`            | Get attendance details for a given student                       |
+| GET    | `/getPresentAbsentList/`           | Fetch present/absent list for a particular session               |
+| POST   | `/changeAttendance/`               | Manually change attendance (e.g., correct misclassified student) |
 
 > These endpoints together power the **“upload → process → verify → finalize”** attendance flow from the teacher app and admin dashboard.
-
 
 ---
 
@@ -252,11 +256,9 @@ Your pipeline can then load it dynamically.
 
 We appreciate contributions via PRs and issues:
 
-1. Fork the repo  
-2. Create a feature branch  
-3. Commit changes  
-4. Open PR with explanation  
+1. Fork the repo
+2. Create a feature branch
+3. Commit changes
+4. Open PR with explanation
 
 ---
-
-

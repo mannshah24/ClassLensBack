@@ -24,9 +24,8 @@ import os
 from pathlib import Path
 import cv2
 import matplotlib.pyplot as plt
-from azure.communication.email import EmailClient
 import uuid
-from .tasks import evaluate_attendance
+from .tasks import evaluate_attendance, send_attendance_notifications
 from django.core.files.storage import default_storage
 from celery.result import AsyncResult
 from pgvector.django import CosineDistance
@@ -234,22 +233,18 @@ def send_otp(request, *args, **kwargs):
         <strong>The ClassLens Team</strong></p>
         """
 
-        email_client = EmailClient.from_connection_string(env("CONNECTION_STRING"))
-
-        message = {
-            "content": {
-                "subject": subject,
-                "plainText": plain_message,
-                "html": html_message,
-            },
-            "recipients": {"to": [{"address": email, "displayName": display_name}]},
-            "senderAddress": "DoNotReply@5e413bf2-7085-4332-af0d-80905f679aac.azurecomm.net",
-        }
-
-        poller = email_client.begin_send(message)
-        if poller.result()["status"] == "Succeeded":
+        try:
+            send_mail(
+                subject=subject,
+                message=plain_message,
+                from_email=settings.DEFAULT_FROM_EMAIL,
+                recipient_list=[email],
+                html_message=html_message,
+                fail_silently=False,
+            )
             return Response({"message": "OTP sent successfully"}, status=200)
-        else:
+        except Exception as email_error:
+            print(f"Email send error: {email_error}")
             return Response({"message": "Failed to send OTP"}, status=500)
 
     except Exception as e:
@@ -576,9 +571,12 @@ def change_attendance(request, *args, **kwargs):
     class_session_id = request.data.get("class_session_id")
     student_list=request.data.get("student_list")
 
+    class_session = ClassSession.objects.get(id=class_session_id)
     total_sessions=ClassSession.objects.filter(
-        subject=ClassSession.objects.get(id=class_session_id).subject
+        subject=class_session.subject
     ).count()
+
+    notification_list = []
 
     for student_id in student_list:
         attendance_record = AttendanceRecord.objects.filter(class_session_id=class_session_id, student_id=student_id).first()
@@ -595,6 +593,18 @@ def change_attendance(request, *args, **kwargs):
             ).update(attendancePercentage=(F('present_count')*100.0)/total_sessions)
 
             attendance_record.save()
+            
+            # Add to notification list
+            notification_list.append((attendance_record.student, attendance_record.status))
+    
+    # Send notifications to students whose attendance was changed
+    if notification_list:
+        send_attendance_notifications(
+            notification_list,
+            class_session.subject.name,
+            class_session.class_datetime
+        )
+    
     return Response(status=status.HTTP_200_OK)
 
 @api_view(["GET"])

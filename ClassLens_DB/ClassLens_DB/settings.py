@@ -174,3 +174,12 @@ CELERY_RESULT_SERIALIZER = 'json'
 CELERY_TIMEZONE = TIME_ZONE
 CELERY_TASK_TRACK_STARTED = True
 CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
+
+# Email Configuration
+EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
+EMAIL_HOST = env('EMAIL_HOST')  # e.g., 'smtp.gmail.com' for Gmail
+EMAIL_PORT = env('EMAIL_PORT', default=587)  # 587 for TLS, 465 for SSL
+EMAIL_USE_TLS = True  # Use False if using SSL (port 465)
+EMAIL_HOST_USER = env('EMAIL_HOST_USER')  # Your email address
+EMAIL_HOST_PASSWORD = env('EMAIL_HOST_PASSWORD')  # Your email password/app password
+DEFAULT_FROM_EMAIL = env('EMAIL_HOST_USER')
