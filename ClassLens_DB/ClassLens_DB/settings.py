@@ -52,7 +52,6 @@ INSTALLED_APPS = [
     "DatabaseAdminApp",
     "rest_framework",
     'corsheaders',
-    'django_redis'
 ]
 
 MIDDLEWARE = [
@@ -105,11 +104,8 @@ DATABASES = {
 
 CACHES = {
     "default": {
-        "BACKEND": "django_redis.cache.RedisCache",
-        "LOCATION": env('REDIS_URL'),
-        "OPTIONS": {
-            "CLIENT_CLASS": "django_redis.client.DefaultClient",
-        }
+        "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+        "LOCATION": "classlens-local-cache",
     }
 }
 
@@ -164,8 +160,8 @@ MEDIA_ROOT = BASE_DIR / "media"
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
-CELERY_BROKER_URL = env('REDIS_URL')
-CELERY_RESULT_BACKEND = env('REDIS_URL')
+CELERY_BROKER_URL = env('RABBITMQ_URL')
+CELERY_RESULT_BACKEND = 'rpc://'
 
 CELERY_ACCEPT_CONTENT = ['json']
 CELERY_TASK_SERIALIZER = 'json'

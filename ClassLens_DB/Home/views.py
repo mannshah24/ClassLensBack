@@ -390,8 +390,12 @@ def set_password(request, *args, **kwargs):
             if student : 
                 student.password_hash = make_password(password)
                 try : 
-                    student.face_embedding=registerNewStudent(request.FILES.get("photo"))
-                except ValueError as ve :
+                    embedding=registerNewStudent(request.FILES.get("photo"))
+                    if not isinstance(embedding,Exception):
+                        student.face_embedding = embedding
+                    else : 
+                        raise Exception("Face embedding error: " + str(embedding))
+                except Exception as e :
                     return Response({"error": "Face Not Detected, Upload A New Image"}, status=status.HTTP_400_BAD_REQUEST)
                 student.save()
                 print("Student password set successfully")
@@ -480,8 +484,28 @@ def mark_attendance(request, *args, **kwargs):
     departmentName = request.data.get("departmentName")
     year = request.data.get("year")
 
-    if not all([photos, subject_id, teacher_id, departmentName, year]):
-        return Response({"error": "Missing required fields (photo, subject_id, teacher_id, department_id, year)."}, status=400)
+    # Debug log to see exactly what is received
+    print("=" * 60)
+    print("MARK ATTENDANCE REQUEST RECEIVED")
+    print(f"  photos      : {photos}")
+    print(f"  subject_id  : {subject_id!r}")
+    print(f"  teacher_id  : {teacher_id!r}")
+    print(f"  department  : {departmentName!r}")
+    print(f"  year        : {year!r}")
+    print("=" * 60)
+
+    missing = []
+    if not photos:         missing.append("photo")
+    if not subject_id:     missing.append("subjectID")
+    if not teacher_id:     missing.append("teacherID")
+    if not departmentName: missing.append("departmentName")
+    if not year:           missing.append("year")
+
+    if missing:
+        return Response({"error": f"Missing required fields: {', '.join(missing)}"}, status=400)
+
+    if int(teacher_id) == 0:
+        return Response({"error": "Invalid teacher ID (0). Please log in again."}, status=400)
 
     try:
         class_session = ClassSession.objects.create(
@@ -502,7 +526,7 @@ def mark_attendance(request, *args, **kwargs):
                 photo=photo
             )
 
-        task = evaluate_attendance.delay(total_sessions,class_session.id,request.scheme, request.get_host())
+        task = evaluate_attendance.delay(total_sessions,class_session.id,request.scheme,"14.139.121.110:11020")
 
         return Response({
             "message": "Attendance processing started. You will be notified once it's done.",
@@ -809,3 +833,10 @@ def remove_notification_token(request, *args, **kwargs):
             {"detail": "Something went wrong"},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
+    
+@api_view(["GET"])
+def health(request,*args,**kwargs):
+    return Response(
+        {"message":"ok"},
+        status=200
+    )

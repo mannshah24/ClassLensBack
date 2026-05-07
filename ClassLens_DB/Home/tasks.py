@@ -226,6 +226,7 @@ def evaluate_attendance(total_sessions,class_session_id:int,scheme, host):
         session.subject.name,
         session.class_datetime
     )
+    print(f"images url {image_urls[0]}")
 
     return {
         "num_faces": total_faces,

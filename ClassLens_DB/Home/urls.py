@@ -27,6 +27,7 @@ urlpatterns = [
     path('student/dashboard/', get_student_dashboard, name='get_student_dashboard'),
     path('student/notification-token/', update_notification_token, name='update_notification_token'),
     path('student/notification-token/remove/', remove_notification_token, name='remove_notification_token'),
+
 ]
 
 if settings.DEBUG:

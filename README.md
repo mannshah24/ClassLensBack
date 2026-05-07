@@ -49,7 +49,7 @@ ClassLens/
 
 - **Backend Framework**: Django, Django REST Framework
 - **Task Queue**: Celery
-- **Message Broker / Cache**: Redis
+- **Message Broker**: RabbitMQ
 - **Database**: PostgreSQL (with `pgvector` extension)
 - **Face Pipeline**: DeepFace, RetinaFace, GFPGAN
 - **Auth & OTP**: JWT authentication + Email OTP verification
@@ -63,7 +63,7 @@ ClassLens/
 
 - Python 3.10+
 - PostgreSQL 13+ (local or managed, with pgvector installed)
-- Redis server
+- RabbitMQ server
 - Virtual environment (recommended)
 
 ---
@@ -104,8 +104,8 @@ DB_PASSWORD=your_password
 DB_HOST=your_host
 DB_PORT=5432
 
-# Redis
-REDIS_URL=redis://localhost:6379
+# RabbitMQ
+RABBITMQ_URL=amqp://guest:guest@localhost:5672//
 
 # Email Configuration (SMTP)
 EMAIL_HOST=smtp.gmail.com  # Use smtp-mail.outlook.com for Outlook
@@ -156,14 +156,23 @@ You can now hit the API from:
 
 ---
 
-## ⚡ Celery & Redis Setup
+## ⚡ Celery & RabbitMQ Setup
 
-Start Redis locally or via Docker:
+Start RabbitMQ locally or via Docker:
 
 ```bash
-redis-server # local OR
-docker run -d --name classlens-redis -p 6379:6379 redis
+# local server (default broker: 5672, management UI: 15672)
+rabbitmq-server
+
+# OR Docker
+docker run -d --name classlens-rabbitmq -p 5672:5672 -p 15672:15672 rabbitmq:3-management
 ```
+
+RabbitMQ management UI:
+
+- URL: http://localhost:15672/
+- Username: guest
+- Password: guest
 
 Start Celery worker:
 

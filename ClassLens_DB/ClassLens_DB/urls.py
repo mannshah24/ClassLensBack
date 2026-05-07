@@ -21,9 +21,11 @@ from django.conf import settings
 from django.conf.urls.static import static
 from DatabaseAdminApp import urls as db_admin_urls
 from django.urls import include
+from Home.views import health
 
 urlpatterns = [
     path("admin/", admin.site.urls),
+    path("health/",health,name="health_check"),
     path("api/", include(urls)),
     path("api/", include(db_admin_urls)),
 ]
