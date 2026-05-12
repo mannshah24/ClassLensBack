@@ -22,10 +22,28 @@ from django.conf.urls.static import static
 from DatabaseAdminApp import urls as db_admin_urls
 from django.urls import include
 from Home.views import health
+from django.views.generic import RedirectView
+from django.http import JsonResponse
+
+
+def api_root(request):
+    return JsonResponse(
+        {
+            "message": "ClassLens API",
+            "routes": {
+                "health": "/api/health/",
+                "departments": "/api/getDepartments/",
+                "admin": "/api/admin/",
+            },
+        }
+    )
 
 urlpatterns = [
     path("admin/", admin.site.urls),
     path("health/",health,name="health_check"),
+    path("api", RedirectView.as_view(url="/api/", permanent=False)),
+    path("api/", api_root, name="api_root"),
+    path("api/health/", health, name="api_health"),
     path("api/", include(urls)),
     path("api/", include(db_admin_urls)),
 ]

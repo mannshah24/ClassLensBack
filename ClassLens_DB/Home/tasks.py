@@ -1,50 +1,112 @@
 from celery import shared_task
-import matplotlib.pyplot as plt
-import cv2
 import os
 from rest_framework.response import Response
-from deepface import DeepFace
 import uuid
-import torch
 from django.conf import settings
 from django.http import request
 import numpy as np
 from scipy.spatial.distance import cosine
 import json
 import sys, types
-import torchvision.transforms.functional as F
 from django.db.models import F as DbF
-import firebase_admin
-from firebase_admin import credentials, messaging
+
+# Optional heavy dependencies — import lazily or fall back to None so management commands work without them
+try:
+    import matplotlib.pyplot as plt
+except Exception:
+    plt = None
+try:
+    import cv2
+except Exception:
+    cv2 = None
+try:
+    from deepface import DeepFace
+except Exception:
+    DeepFace = None
+try:
+    import torch
+except Exception:
+    torch = None
+try:
+    import torchvision.transforms.functional as F
+except Exception:
+    F = None
+try:
+    import firebase_admin
+    from firebase_admin import credentials, messaging
+except Exception:
+    firebase_admin = None
+    credentials = None
+    messaging = None
+try:
+    from gfpgan import GFPGANer
+except Exception:
+    GFPGANer = None
 
 module_name = 'torchvision.transforms.functional_tensor'
 
-if module_name not in sys.modules:
-    functional_tensor_module = types.ModuleType(module_name)
-    functional_tensor_module.rgb_to_grayscale = F.rgb_to_grayscale
-    sys.modules[module_name] = functional_tensor_module
+if F is not None:
+    if module_name not in sys.modules:
+        functional_tensor_module = types.ModuleType(module_name)
+        functional_tensor_module.rgb_to_grayscale = F.rgb_to_grayscale
+        sys.modules[module_name] = functional_tensor_module
 
-_original_torch_load = torch.load
+if torch is not None:
+    _original_torch_load = torch.load
 
-def patched_torch_load(f, *args, **kwargs):
-    if 'weights_only' not in kwargs:
-        kwargs['weights_only'] = False
-    return _original_torch_load(f, *args, **kwargs)
+    def patched_torch_load(f, *args, **kwargs):
+        if 'weights_only' not in kwargs:
+            kwargs['weights_only'] = False
+        return _original_torch_load(f, *args, **kwargs)
 
-torch.load = patched_torch_load
+    torch.load = patched_torch_load
 
-from gfpgan import GFPGANer
 from .models import Student, AttendanceRecord, ClassSession, StudentEnrollment, StudentAttendancePercentage
 
-restorer = GFPGANer(
-    model_path='GFPGANv1.4.pth',
-    upscale=2,
-    arch='clean',
-    channel_multiplier=2,
-    bg_upsampler=None
-)
+# Defer GFPGAN restorer initialization until a task runs to avoid import-time file access
+restorer = None
+
+def get_restorer():
+    global restorer
+    if restorer is not None:
+        return restorer
+
+    # If GFPGANer isn't available, skip initialization
+    if GFPGANer is None:
+        print("GFPGAN not available; skipping restorer initialization")
+        return None
+
+    model_path = None
+    try:
+        from django.conf import settings as _settings
+        if hasattr(_settings, 'GFPGAN_MODEL_PATH') and _settings.GFPGAN_MODEL_PATH:
+            model_path = _settings.GFPGAN_MODEL_PATH
+        else:
+            # default to BASE_DIR/GFPGANv1.4.pth
+            model_path = str(_settings.BASE_DIR / 'GFPGANv1.4.pth')
+    except Exception:
+        model_path = 'GFPGANv1.4.pth'
+
+    try:
+        restorer = GFPGANer(
+            model_path=model_path,
+            upscale=2,
+            arch='clean',
+            channel_multiplier=2,
+            bg_upsampler=None
+        )
+        print(f"GFPGAN restorer initialized with model: {model_path}")
+    except Exception as e:
+        print(f"Warning: GFPGAN restorer failed to initialize: {e}")
+        restorer = None
+
+    return restorer
 
 def initialize_firebase():
+    if firebase_admin is None or credentials is None:
+        print("Firebase Admin SDK not available; skipping notifications")
+        return
+
     if not firebase_admin._apps:
         cred_path = os.path.join(settings.BASE_DIR, 'firebase-service-account.json')
         if os.path.exists(cred_path):
@@ -143,13 +205,21 @@ def evaluate_attendance(total_sessions,class_session_id:int,scheme, host):
             facial_area = face_data['facial_area']
             x, y, w, h = facial_area['x'], facial_area['y'], facial_area['w'], facial_area['h']
 
-            _, restored_list, _ = restorer.enhance(
-                face_crop_bgr,
-                has_aligned=False,
-                only_center_face=True,
-                paste_back=False,
-                weight=0.1
-            )
+            _restorer = get_restorer()
+            if _restorer is not None:
+                try:
+                    _, restored_list, _ = _restorer.enhance(
+                        face_crop_bgr,
+                        has_aligned=False,
+                        only_center_face=True,
+                        paste_back=False,
+                        weight=0.1
+                    )
+                except Exception:
+                    restored_list = []
+            else:
+                restored_list = []
+
             face_to_scan = restored_list[0] if restored_list else face_crop_bgr
 
             face_to_scan_rgb = cv2.cvtColor(face_to_scan, cv2.COLOR_BGR2RGB)
@@ -163,8 +233,12 @@ def evaluate_attendance(total_sessions,class_session_id:int,scheme, host):
                     align=True
                 )
                 captured_embedding = embedding_result[0]['embedding']
-            except ValueError:
-                cv2.rectangle(img_bgr, (x, y), (x + w, y + h), (0, 0, 255), 2)
+            except Exception:
+                if cv2 is not None:
+                    try:
+                        cv2.rectangle(img_bgr, (x, y), (x + w, y + h), (0, 0, 255), 2)
+                    except Exception:
+                        pass
                 continue
 
             best_score = 1.0

@@ -5,18 +5,32 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework_simplejwt.tokens import RefreshToken
 from django.contrib.auth.hashers import make_password
 from django.http import HttpResponse
-import pandas as pd
+try:
+    import pandas as pd
+except Exception:
+    pd = None
 import io
 from .pagination import StudentPagination
 from Home.models import (
     Department, Teacher, Student, Subject, SubjectFromDept,
-    StudentEnrollment, TeacherSubject, AdminUser, StudentAttendancePercentage
+    StudentEnrollment, TeacherSubject, AdminUser, StudentAttendancePercentage, Division
+)
+from .models import (
+    APIFaculty,
+    APIStudent,
+    APIPaper,
+    APIStudentAcademicInformation,
+    APIStudentPartTermPaperMap,
 )
 from .serializers import (
     DepartmentSerializer, TeacherSerializer, StudentSerializer,
     SubjectSerializer, SubjectFromDeptSerializer, StudentEnrollmentSerializer,
-    TeacherSubjectSerializer, AdminUserSerializer
+    TeacherSubjectSerializer, AdminUserSerializer,
+    APIFacultySerializer, APIStudentSerializer, APIPaperSerializer,
+    APIStudentAcademicInformationSerializer, APIStudentPartTermPaperMapSerializer,
+    DivisionSerializer,
 )
+from django.db import transaction
 
 from rest_framework.permissions import BasePermission
 
@@ -466,4 +480,288 @@ class StudentEnrollmentViewSet(viewsets.ModelViewSet):
             
         except Exception as e:
             return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class APIFacultyViewSet(viewsets.ModelViewSet):
+    queryset = APIFaculty.objects.all().order_by("msuis_id")
+    serializer_class = APIFacultySerializer
+    permission_classes = [IsAuthenticated]
+
+
+class APIStudentViewSet(viewsets.ModelViewSet):
+    queryset = APIStudent.objects.all().order_by("prn")
+    serializer_class = APIStudentSerializer
+    permission_classes = [IsAuthenticated]
+
+
+class APIPaperViewSet(viewsets.ModelViewSet):
+    queryset = APIPaper.objects.all().order_by("msuis_id")
+    serializer_class = APIPaperSerializer
+    permission_classes = [IsAuthenticated]
+
+
+class APIStudentAcademicInformationViewSet(viewsets.ModelViewSet):
+    queryset = APIStudentAcademicInformation.objects.all().order_by("msuis_id")
+    serializer_class = APIStudentAcademicInformationSerializer
+    permission_classes = [IsAuthenticated]
+
+
+class APIStudentPartTermPaperMapViewSet(viewsets.ModelViewSet):
+    queryset = APIStudentPartTermPaperMap.objects.all().order_by("msuis_id")
+    serializer_class = APIStudentPartTermPaperMapSerializer
+    permission_classes = [IsAuthenticated]
+
+
+class DivisionViewSet(viewsets.ModelViewSet):
+    queryset = Division.objects.all().select_related('department')
+    serializer_class = DivisionSerializer
+    permission_classes = [IsAuthenticated]
+
+
+def _full_name(student_record):
+    name_parts = [
+        student_record.get("FirstName"),
+        student_record.get("MiddleName"),
+        student_record.get("LastName"),
+    ]
+    merged = " ".join([part.strip() for part in name_parts if isinstance(part, str) and part.strip()])
+    return merged or student_record.get("NameAsPerMarksheet") or "Unknown"
+
+
+def _to_bool(value):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y"}
+    return None
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def sync_msuis_payload(request):
+    """
+    Single entrypoint for API-sourced data ingestion through admin app.
+    This keeps external-source writes centralized for future DB merge workflows.
+    """
+    payload = request.data or {}
+    apply_to_core = bool(payload.get("apply_to_core", True))
+
+    faculties = payload.get("faculties", [])
+    students = payload.get("students", [])
+    papers = payload.get("papers", [])
+    academic_records = payload.get("student_academic_information", [])
+    part_term_maps = payload.get("student_part_term_paper_maps", [])
+
+    counters = {
+        "faculties_synced": 0,
+        "students_synced": 0,
+        "papers_synced": 0,
+        "academic_records_synced": 0,
+        "part_term_maps_synced": 0,
+        "core_departments_upserted": 0,
+        "core_students_upserted": 0,
+        "core_subjects_upserted": 0,
+        "core_enrollments_upserted": 0,
+        "core_divisions_upserted": 0,
+    }
+
+    # Use the latest academic snapshot to derive student year/faculty defaults.
+    latest_academic_by_prn = {}
+
+    with transaction.atomic():
+        for row in faculties:
+            msuis_id = row.get("Id") or row.get("id")
+            if msuis_id is None:
+                continue
+
+            name = row.get("FacultyName") or row.get("Name") or row.get("name")
+            APIFaculty.objects.update_or_create(
+                msuis_id=msuis_id,
+                defaults={
+                    "name": name,
+                    "is_active": _to_bool(row.get("IsActive")),
+                    "is_deleted": _to_bool(row.get("IsDeleted")),
+                    "raw_payload": row,
+                },
+            )
+            counters["faculties_synced"] += 1
+
+            if apply_to_core and name:
+                Department.objects.update_or_create(
+                    id=msuis_id,
+                    defaults={"name": name},
+                )
+                counters["core_departments_upserted"] += 1
+
+        for row in academic_records:
+            msuis_id = row.get("Id") or row.get("id")
+            if msuis_id is None:
+                continue
+
+            prn = row.get("PRN") or row.get("Prn") or row.get("prn")
+            APIStudentAcademicInformation.objects.update_or_create(
+                msuis_id=msuis_id,
+                defaults={
+                    "prn": prn,
+                    "student_admission_id": row.get("StudentAdmissionId"),
+                    "programme_instance_part_term_id": row.get("ProgrammeInstancePartTermId"),
+                    "programme_id": row.get("ProgrammeId"),
+                    "specialisation_id": row.get("SpecialisationId"),
+                    "academic_year_id": row.get("AcademicYearId"),
+                    "institute_id": row.get("InstituteId"),
+                    "faculty_id": row.get("FacultyId"),
+                    "part_term_status": row.get("PartTermStatus"),
+                    "raw_payload": row,
+                },
+            )
+            counters["academic_records_synced"] += 1
+
+            if prn is not None:
+                latest_academic_by_prn[prn] = row
+
+        for row in students:
+            prn = row.get("PRN") or row.get("Prn") or row.get("prn")
+            if prn is None:
+                continue
+
+            APIStudent.objects.update_or_create(
+                prn=prn,
+                defaults={
+                    "first_name": row.get("FirstName"),
+                    "middle_name": row.get("MiddleName"),
+                    "last_name": row.get("LastName"),
+                    "email_id": row.get("EmailId"),
+                    "mobile_no": row.get("MobileNo"),
+                    "faculty_id": row.get("FacultyId"),
+                    "programme_name": row.get("ProgrammeName"),
+                    "admission_year": row.get("AdmissionYear"),
+                    "passing_year": row.get("PassingYear"),
+                    "raw_payload": row,
+                },
+            )
+            counters["students_synced"] += 1
+
+            if apply_to_core:
+                academic = latest_academic_by_prn.get(prn, {})
+                faculty_id = row.get("FacultyId") or academic.get("FacultyId")
+                if not faculty_id:
+                    continue
+
+                dept = Department.objects.filter(id=faculty_id).first()
+                if dept is None:
+                    dept = Department.objects.create(
+                        id=faculty_id,
+                        name=f"Faculty-{faculty_id}",
+                    )
+                    counters["core_departments_upserted"] += 1
+
+                # When exact year is unavailable from API, keep a stable fallback.
+                year = row.get("Year") or 1
+
+                Student.objects.update_or_create(
+                    prn=prn,
+                    defaults={
+                        "name": _full_name(row),
+                        "email": row.get("EmailId") or f"{prn}@classlens.local",
+                        "year": year,
+                        "department": dept,
+                    },
+                )
+                counters["core_students_upserted"] += 1
+
+        for row in papers:
+            msuis_id = row.get("Id") or row.get("id")
+            if msuis_id is None:
+                continue
+
+            paper_code = row.get("PaperCode") or row.get("Code") or f"PAPER-{msuis_id}"
+            paper_name = row.get("PaperName") or row.get("Name") or paper_code
+
+            APIPaper.objects.update_or_create(
+                msuis_id=msuis_id,
+                defaults={
+                    "subject_id": row.get("SubjectId"),
+                    "paper_name": paper_name,
+                    "paper_code": paper_code,
+                    "is_credit": _to_bool(row.get("IsCredit")),
+                    "max_marks": row.get("MaxMarks"),
+                    "min_marks": row.get("MinMarks"),
+                    "credits": row.get("Credits"),
+                    "is_active": _to_bool(row.get("IsActive")),
+                    "is_deleted": _to_bool(row.get("IsDeleted")),
+                    "raw_payload": row,
+                },
+            )
+            counters["papers_synced"] += 1
+
+            if apply_to_core:
+                Subject.objects.update_or_create(
+                    id=msuis_id,
+                    defaults={"code": paper_code, "name": paper_name},
+                )
+                counters["core_subjects_upserted"] += 1
+
+        for row in part_term_maps:
+            msuis_id = row.get("Id") or row.get("id")
+            if msuis_id is None:
+                continue
+
+            prn = row.get("PRN") or row.get("Prn")
+            paper_id = row.get("MstPaperId") or row.get("PaperId")
+
+            APIStudentPartTermPaperMap.objects.update_or_create(
+                msuis_id=msuis_id,
+                defaults={
+                    "prn": prn,
+                    "student_academic_information_id": row.get("StudentAcademicInformationId"),
+                    "programme_instance_part_term_id": row.get("ProgrammeInstancePartTermId"),
+                    "paper_id": row.get("PaperId"),
+                    "mst_paper_id": row.get("MstPaperId"),
+                    "obtained_marks": row.get("ObtainedMarks"),
+                    "obtained_grade": row.get("ObtainedGrade"),
+                    "paper_status": row.get("PaperStatus"),
+                    "part_term_status": row.get("PartTermStatus"),
+                    "division": row.get("Division"),
+                    "raw_payload": row,
+                },
+            )
+            counters["part_term_maps_synced"] += 1
+
+            if apply_to_core and prn and paper_id:
+                student = Student.objects.filter(prn=prn).first()
+                subject = Subject.objects.filter(id=paper_id).first()
+                if student and subject:
+                    StudentEnrollment.objects.update_or_create(
+                        student_prn=student.prn,
+                        subject=subject,
+                    )
+                    StudentAttendancePercentage.objects.get_or_create(
+                        student=student,
+                        subject=subject,
+                        defaults={"present_count": 0, "attendancePercentage": 0.0},
+                    )
+                    counters["core_enrollments_upserted"] += 1
+
+                    division_name = row.get("Division")
+                    semester = row.get("Semester")
+                    if division_name and semester:
+                        division_obj, _ = Division.objects.get_or_create(
+                            department=student.department,
+                            program_name=(row.get("ProgrammeName") or "Program"),
+                            year=student.year,
+                            semester=int(semester),
+                            name=str(division_name),
+                        )
+                        counters["core_divisions_upserted"] += 1
+
+    return Response(
+        {
+            "message": "MSUIS payload synced via admin app",
+            "apply_to_core": apply_to_core,
+            "counts": counters,
+        },
+        status=status.HTTP_200_OK,
+    )
  

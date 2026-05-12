@@ -175,11 +175,15 @@ RabbitMQ management UI:
 - Username: guest
 - Password: guest
 
-Start Celery worker:
+Start Celery worker on Windows:
 
-```bash
-celery -A ClassLens_DB.celery worker -l info -P gevent
+```powershell
+Set-Location "M:\ClassLens\classLenseBackend\ClassLens\ClassLens_DB"
+$env:PYTHONPATH = "M:\ClassLens\classLenseBackend\ClassLens\ClassLens_DB"
+& ".\.venv\Scripts\python.exe" -m celery -A ClassLens_DB.celery worker -l info -P solo
 ```
+
+Use `-P solo` on Windows. `gevent` is the source of the shutdown error you saw in this environment.
 
 ---
 

@@ -2,11 +2,18 @@ from rest_framework import status
 import string
 from django.db.models import F
 from rest_framework.decorators import api_view, parser_classes,permission_classes
-from deepface import DeepFace
-from PIL import Image
+# defer heavy/optional imports so Django can run management commands without GPU/deep libs
+try:
+    from deepface import DeepFace
+except Exception:
+    DeepFace = None
+try:
+    from PIL import Image
+except Exception:
+    Image = None
 import numpy as np
 from rest_framework.response import Response
-from .models import Department, Student, Teacher, SubjectFromDept, StudentAttendancePercentage,AttendanceRecord, StudentEnrollment,TeacherSubject, ClassSession, Subject,AttendancePhotos,AdminUser
+from .models import Department, Student, Teacher, SubjectFromDept, StudentAttendancePercentage,AttendanceRecord, StudentEnrollment,TeacherSubject, ClassSession, Subject,AttendancePhotos,AdminUser, Division
 from django.db.models import Count, Q
 from .serializers import DepartmentSerializer,SubjectSerializer
 from rest_framework.parsers import MultiPartParser
@@ -22,8 +29,14 @@ from django.conf import settings
 import environ
 import os
 from pathlib import Path
-import cv2
-import matplotlib.pyplot as plt
+try:
+    import cv2
+except Exception:
+    cv2 = None
+try:
+    import matplotlib.pyplot as plt
+except Exception:
+    plt = None
 import uuid
 from .tasks import evaluate_attendance, send_attendance_notifications
 from django.core.files.storage import default_storage
@@ -483,6 +496,7 @@ def mark_attendance(request, *args, **kwargs):
     teacher_id = request.data.get("teacherID")
     departmentName = request.data.get("departmentName")
     year = request.data.get("year")
+    division_id = request.data.get("divisionID")
 
     # Debug log to see exactly what is received
     print("=" * 60)
@@ -492,6 +506,7 @@ def mark_attendance(request, *args, **kwargs):
     print(f"  teacher_id  : {teacher_id!r}")
     print(f"  department  : {departmentName!r}")
     print(f"  year        : {year!r}")
+    print(f"  division_id : {division_id!r}")
     print("=" * 60)
 
     missing = []
@@ -508,11 +523,16 @@ def mark_attendance(request, *args, **kwargs):
         return Response({"error": "Invalid teacher ID (0). Please log in again."}, status=400)
 
     try:
+        division = None
+        if division_id:
+            division = get_object_or_404(Division, id=division_id)
+
         class_session = ClassSession.objects.create(
             department = get_object_or_404(Department, name=departmentName),
             year = year,
             subject = get_object_or_404(Subject, id=subject_id),
             teacher = get_object_or_404(Teacher, id=teacher_id),
+            division=division,
             class_datetime = datetime.now(),
         )
 
@@ -756,11 +776,19 @@ def get_student_dashboard(request, *args, **kwargs):
                 "date": record.class_session.class_datetime.isoformat()
             })
 
+        # compute overall attendance across all subjects (weighted by total sessions)
+        total_classes_sum = sum(item.get('total', 0) for item in subjects_data)
+        attended_sum = sum(item.get('attended', 0) for item in subjects_data)
+        overall_percentage = None
+        if total_classes_sum > 0:
+            overall_percentage = round((attended_sum / total_classes_sum) * 100.0, 2)
+
         return Response({
             "student_name": student.name,
             "prn": student.prn,
+            "overall_attendance": overall_percentage,
             "subjects": subjects_data,
-            "recent_activity": recent_activity
+            "recent_activity": recent_activity,
         }, status=status.HTTP_200_OK)
 
     except Exception as e:

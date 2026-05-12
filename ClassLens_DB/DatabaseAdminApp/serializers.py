@@ -5,6 +5,13 @@ from Home.models import (
     Department, Teacher, Student, Subject, SubjectFromDept,
     StudentEnrollment, TeacherSubject, AdminUser
 )
+from .models import (
+    APIFaculty,
+    APIStudent,
+    APIPaper,
+    APIStudentAcademicInformation,
+    APIStudentPartTermPaperMap,
+)
 
 class DepartmentSerializer(serializers.ModelSerializer):
     class Meta:
@@ -94,3 +101,40 @@ class AdminUserSerializer(serializers.ModelSerializer):
         user.set_password(validated_data['password'])
         user.save()
         return user
+
+
+class APIFacultySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = APIFaculty
+        fields = "__all__"
+
+
+class APIStudentSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = APIStudent
+        fields = "__all__"
+
+
+class APIPaperSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = APIPaper
+        fields = "__all__"
+
+
+class APIStudentAcademicInformationSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = APIStudentAcademicInformation
+        fields = "__all__"
+
+
+class APIStudentPartTermPaperMapSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = APIStudentPartTermPaperMap
+        fields = "__all__"
+
+
+class DivisionSerializer(serializers.ModelSerializer):
+    class Meta:
+        from Home.models import Division
+        model = Division
+        fields = ['id', 'department', 'program_name', 'year', 'semester', 'name']

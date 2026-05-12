@@ -1,9 +1,6 @@
 from django.db import models
-from pgvector.django import VectorField, IvfflatIndex, HnswIndex
 from django.contrib.auth.hashers import make_password, check_password
-
-from django.db import models
-from django.db.models import F
+from pgvector.django import HnswIndex, VectorField
 
 class Department(models.Model):
     name = models.TextField(unique=True, null=False)
@@ -50,13 +47,15 @@ class Student(models.Model):
 class Subject(models.Model):
     code = models.TextField(unique=True, null=False,default="")
     name = models.TextField(null=False)
+    department = models.ForeignKey(Department, on_delete=models.SET_NULL, null=True, blank=True)
+    
     def __str__(self):
         return f"{self.name}"
 
 class SubjectFromDept(models.Model):
     department = models.ForeignKey(Department, on_delete=models.CASCADE)
     year = models.IntegerField(null=False)
-    subject = models.ManyToManyField(Subject,null=False)
+    subject = models.ManyToManyField(Subject)
     semester=models.IntegerField(null=False)    
     
     class Meta:
@@ -64,16 +63,37 @@ class SubjectFromDept(models.Model):
 
     def __str__(self):
         return f"{self.department} - {self.year}"
+
+
+class Division(models.Model):
+    """
+    Local teaching division metadata, e.g. BE CSE 4th year Sem 8 Division A.
+    """
+    department = models.ForeignKey(Department, on_delete=models.CASCADE)
+    program_name = models.TextField(null=False, default="")
+    year = models.IntegerField(null=False)
+    semester = models.IntegerField(null=False)
+    name = models.CharField(max_length=20, null=False)
+
+    class Meta:
+        unique_together = ("department", "program_name", "year", "semester", "name")
+
+    def __str__(self):
+        return (
+            f"{self.program_name} {self.year}th year {self.semester}th Sem "
+            f"Division {self.name}"
+        )
     
 class StudentEnrollment(models.Model):
     student_prn = models.BigIntegerField(null=False)
     subject = models.ForeignKey(Subject, on_delete=models.CASCADE)
+    division = models.ForeignKey(Division, on_delete=models.SET_NULL, null=True, blank=True)
 
     class Meta:
-        unique_together = ('student_prn', 'subject')
+        unique_together = ('student_prn', 'subject', 'division')
 
-    def _str_(self):
-        return f"{self.student_prn} enrolled in {self.subject}"
+    def __str__(self):
+        return f"{self.student_prn} enrolled in {self.subject} Division {self.division.name if self.division else 'N/A'}"
     
 class TeacherSubject(models.Model):
     teacher_id = models.ForeignKey(Teacher, on_delete=models.CASCADE)
@@ -82,14 +102,15 @@ class TeacherSubject(models.Model):
     class Meta:
         unique_together = ('teacher_id', 'subject')
 
-    def _str_(self):
-        return f"{self.teacher.name} teaches {self.subject.name}"
+    def __str__(self):
+        return f"{self.teacher_id.name} teaches {self.subject.name}"
     
 class ClassSession(models.Model):
     department = models.ForeignKey(Department, on_delete=models.CASCADE)
     year = models.IntegerField(null=False)
     subject = models.ForeignKey(Subject, on_delete=models.CASCADE)
     teacher = models.ForeignKey(Teacher, on_delete=models.CASCADE)
+    division = models.ForeignKey(Division, on_delete=models.SET_NULL, null=True, blank=True)
     class_datetime = models.DateTimeField(null=False)
 
     def __str__(self):

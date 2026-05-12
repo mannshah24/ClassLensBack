@@ -1,0 +1,132 @@
+
+Based on your clarification—that you're fetching data from an API with the structure of the DBMSUIS_V7.sql file (MSUIS v7 database schema), and you'll implement attendance-related services yourself—I'll provide a mapping of the exact data you can fetch and map from this file to your backend's required schema. I'll also list the remaining data/services that need to be implemented separately (e.g., attendance, admin, and other missing features).
+
+Key Assumptions
+The MSUIS API will provide data in JSON/REST format mirroring the SQL tables (e.g., endpoints like /MstStudent, /MstFaculty, etc.).
+Mapping is based on inferred fields from the SQL dump (via grep searches and references). Some fields are confirmed (e.g., PRN in MstStudent), others are assumed based on typical university schemas.
+You'll need to transform/map the data during API calls (e.g., via scripts or Django views) to fit your models.
+Missing tables/fields in MSUIS mean you'll skip or default them (e.g., set face_embedding to null).
+No direct "teacher" table in MSUIS; faculty might serve as departments/teachers, but you'll need to adapt.
+Mapped Data: What You Can Fetch and Map from MSUIS
+Here's the mapping from MSUIS tables to your backend tables/fields. Only map what's available; for missing fields, use defaults or skip.
+
+Home_department (Map from MstFaculty)
+
+MSUIS Source: MstFaculty (referenced in foreign keys; CREATE TABLE not in dump, but fields inferred from usage: Id, Name, etc.).
+Mapping:
+id → MstFaculty.Id (primary key).
+name → MstFaculty.Name (or similar field; assume it's the faculty name as department).
+Notes: Faculty in MSUIS seems to represent departments/schools. If MstFaculty has more fields (e.g., code), map accordingly. No direct match for other fields.
+Home_teacher (Partial Map from MstFaculty or None)
+
+MSUIS Source: No direct table (MstFaculty is more like departments). If faculty members are stored elsewhere, use MstFaculty; otherwise, no data.
+Mapping (if using MstFaculty as proxy):
+id → MstFaculty.Id.
+name → MstFaculty.Name (assume name field exists).
+email → Not available (default to null or generate).
+password_hash → Not available (implement separately or default).
+department_id → Self-reference or link to another MstFaculty if hierarchical.
+date_joined → Not available (default to current date).
+Notes: MSUIS may not track individual teachers. You might need to create teacher records manually or map from other sources.
+Home_student (Map from MstStudent)
+
+MSUIS Source: MstStudent (fields inferred: PRN, FirstName, MiddleName, LastName, Email, etc.).
+Mapping:
+id → Auto-generated (MSUIS uses PRN as key, but map to your id).
+prn → MstStudent.PRN.
+name → Concatenate FirstName + MiddleName + LastName (or FullName if available).
+email → MstStudent.Email.
+password_hash → Not available (implement hashing separately or default).
+year → From IncStudentAcademicInformation.Year (linked via PRN).
+department_id → MstStudent.FacultyId (maps to Home_department).
+face_embedding → Not available (implement facial recognition separately).
+notification_token → Not available (implement push notifications separately).
+Notes: Link to IncStudentAcademicInformation for year/department details.
+Home_subject (Map from MstPaper)
+
+MSUIS Source: MstPaper (fields: Id, Code, Name, etc.).
+Mapping:
+id → MstPaper.Id.
+code → MstPaper.Code.
+name → MstPaper.Name.
+Notes: Papers in MSUIS are subjects/courses.
+Home_subjectfromdept (Partial Map from IncProgrammeInstancePartTerm or Mappings)
+
+MSUIS Source: IncProgrammeInstancePartTerm (links programmes, parts, terms) and MstProgrammePartTermPaperMap.
+Mapping:
+id → Auto-generated.
+department_id → IncProgrammeInstancePartTerm.FacultyId (or from MstProgramme).
+year → IncProgrammeInstancePartTerm.Year.
+semester → IncProgrammeInstancePartTerm.Semester (or Term).
+Subject many-to-many: From MstProgrammePartTermPaperMap.PaperId.
+Notes: Complex; map programmes as departments.
+Home_studentenrollment (Map from IncStudentPartTermPaperMap)
+
+MSUIS Source: IncStudentPartTermPaperMap (PRN, PaperId, etc.).
+Mapping:
+id → Auto-generated.
+student_prn → IncStudentPartTermPaperMap.PRN.
+subject_id → IncStudentPartTermPaperMap.PaperId.
+Notes: Direct mapping for enrollments.
+Home_teachersubject (No Direct Map)
+
+MSUIS Source: None (no teacher-subject links).
+Mapping: Skip or create manually (e.g., assign based on programmes).
+Notes: Implement separately.
+Home_classsession (No Direct Map)
+
+MSUIS Source: None.
+Mapping: Implement separately (your attendance service will create these).
+Home_attendancephotos (No Direct Map)
+
+MSUIS Source: None.
+Mapping: Implement separately.
+Home_attendancerecord (No Direct Map)
+
+MSUIS Source: None.
+Mapping: Implement separately.
+Home_studentattendancepercentage (No Direct Map)
+
+MSUIS Source: None.
+Mapping: Implement separately.
+Home_adminuser (No Direct Map)
+
+MSUIS Source: None.
+Mapping: Implement separately.
+Home_subjectfromdept_subject (Map from Junctions)
+
+MSUIS Source: MstProgrammePartTermPaperMap or similar.
+Mapping: subjectfromdept_id and subject_id from mappings.
+Remaining Data/Services to Implement
+Since MSUIS lacks attendance, admin, and some core features, you'll need to build these yourself. Here's what to implement:
+
+Attendance System:
+
+Tables: Home_classsession, Home_attendancephotos, Home_attendancerecord, Home_studentattendancepercentage.
+Services: Facial recognition (DeepFace), photo upload, attendance marking, notifications (FCM), task queuing (Celery).
+APIs: Mark attendance, get attendance status, teacher subjects, student dashboard, etc.
+Authentication & Admin:
+
+Table: Home_adminuser.
+Services: JWT login for admins, password hashing, user management.
+APIs: Admin login, CRUD for all models.
+Missing Fields/Data:
+
+password_hash for students/teachers (hash during registration).
+face_embedding (generate via DeepFace on photo upload).
+notification_token (store on app login).
+date_joined for teachers (set on creation).
+Teacher-subject assignments (manual or based on programmes).
+Class sessions (create dynamically for attendance).
+Other Services:
+
+OTP/email verification.
+Dashboard stats (counts from fetched data).
+Bulk uploads (CSV/Excel for students/teachers).
+Health checks.
+Implementation Steps
+Fetch from MSUIS API: Use endpoints like GET /MstStudent to pull data, then map/transform in Django (e.g., in views or management commands).
+Populate DB: Run scripts to insert mapped data into your models.
+Build Missing Parts: Develop the attendance app as per your existing code (models, views, tasks).
+Testing: Validate mappings with sample data; ensure foreign keys align.
+If you share sample API responses from MSUIS or need code snippets for mapping, I can refine this!
