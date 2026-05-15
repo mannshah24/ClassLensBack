@@ -1,6 +1,5 @@
 from django.db import models
 from django.contrib.auth.hashers import make_password, check_password
-from pgvector.django import HnswIndex, VectorField
 
 class Department(models.Model):
     name = models.TextField(unique=True, null=False)
@@ -29,18 +28,8 @@ class Student(models.Model):
         Department, 
         on_delete=models.CASCADE, 
     )
-    face_embedding = VectorField(dimensions=512, null=True, blank=True)
+    face_embedding = models.JSONField(null=True, blank=True)
     notification_token = models.TextField(null=True, blank=True)
-    class Meta:
-        indexes = [
-           HnswIndex(
-                name='student_face_embedding_idx',
-                fields=['face_embedding'],
-                m=16,                 
-                ef_construction=200,  
-                opclasses=['vector_cosine_ops']
-            ),
-        ]
     def __str__(self):
         return f"{self.name} ({self.prn})"
     
