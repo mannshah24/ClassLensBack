@@ -46,3 +46,24 @@ gfpgan
 # Firebase credentials (NEVER commit these!)
 firebase-service-account.json
 **/firebase-service-account.json
+
+
+# Markdown docs except README
+*.md
+!README.md
+
+# Local test/debug files
+test_sync_endpoint.py
+
+# Local schema/docs
+New_schema
+
+# Python virtual env
+.venv/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Environment files
+.env

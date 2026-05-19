@@ -13,6 +13,7 @@ https://docs.djangoproject.com/en/5.1/ref/settings/
 from pathlib import Path
 import environ
 import os
+from urllib.parse import quote_plus
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -26,16 +27,19 @@ environ.Env.read_env(os.path.join(BASE_DIR, ".env"))
 # See https://docs.djangoproject.com/en/5.1/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = "django-insecure-x3zih9=91am0f(gkv&16y+n%7i1b91e-^mh&v*_r=_kz@y7t04"
+SECRET_KEY = env("SECRET_KEY")
 
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
 ALLOWED_HOSTS = [
+    '192.168.1.8',
+    '10.0.2.2',
     '14.139.121.110',
     'localhost',
     '127.0.0.1',
-    '172.25.13.31'
+    '172.25.13.31',
+    '10.0.3.2',
 ]
 
 
@@ -161,7 +165,13 @@ MEDIA_ROOT = BASE_DIR / "media"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 CELERY_BROKER_URL = env('RABBITMQ_URL')
-CELERY_RESULT_BACKEND = 'rpc://'
+CELERY_RESULT_BACKEND = env('CELERY_RESULT_BACKEND', default='db+postgresql://{0}:{1}@{2}:{3}/{4}'.format(
+    env("DB_USER"),
+    quote_plus(env("DB_PASSWORD")),
+    env("DB_HOST"),
+    env("DB_PORT"),
+    env("DB_NAME")
+))
 
 CELERY_ACCEPT_CONTENT = ['json']
 CELERY_TASK_SERIALIZER = 'json'
@@ -183,6 +193,7 @@ DEFAULT_FROM_EMAIL = env('EMAIL_HOST_USER')
 # Django REST Framework Configuration
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (
+        'Home.authentication.CustomAdminAuthentication',
         'rest_framework_simplejwt.authentication.JWTAuthentication',
     ),
     'DEFAULT_PERMISSION_CLASSES': (

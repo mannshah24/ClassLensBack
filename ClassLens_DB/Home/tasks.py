@@ -149,18 +149,26 @@ def send_attendance_notifications(student_records, subject_name, class_datetime)
                 print(f"Failed to send notification to {student.name}: {e}")
 
 @shared_task
-def evaluate_attendance(total_sessions,class_session_id:int,scheme, host):
+def evaluate_attendance(total_sessions, class_session_id: int, scheme, host, division_id=None):
 
     session = ClassSession.objects.get(id=class_session_id)
     images=session.photos.all()
     image_urls=[]
     total_faces=0
 
-    enrolled_prns = list(StudentEnrollment.objects.filter(
+    enrolled_prns_qs = StudentEnrollment.objects.filter(
         subject=session.subject
-    ).values_list('student_prn', flat=True))
+    ).values_list('student_prn', flat=True)
 
-    all_students_qs = Student.objects.filter(prn__in=enrolled_prns)
+    all_students_qs = Student.objects.filter(
+        prn__in=enrolled_prns_qs,
+        year=session.year,
+        department=session.department,
+    )
+    if division_id:
+        all_students_qs = all_students_qs.filter(division_id=division_id)
+
+    enrolled_prns = list(all_students_qs.values_list('prn', flat=True))
     
     student_obj_map = {s.prn: s for s in all_students_qs}
 
@@ -306,6 +314,7 @@ def evaluate_attendance(total_sessions,class_session_id:int,scheme, host):
         "num_faces": total_faces,
         "image_url": image_urls[0] if image_urls else None,
         "class_session_id": class_session_id,
+        "division_id": division_id,
         "present_count": len(present_student_prns),
         "absent_count": len(enrolled_prns) - len(present_student_prns),
         "subject": session.subject.name
