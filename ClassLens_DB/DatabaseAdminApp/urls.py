@@ -14,12 +14,10 @@ from .views import (
     admin_login,
     get_dashboard_stats,
     AdminUserViewSet,
-    APIFacultyViewSet,
     APIStudentViewSet,
     APIPaperViewSet,
-    APIStudentAcademicInformationViewSet,
-    APIStudentPartTermPaperMapViewSet,
     sync_msuis_payload,
+    sync_staging_to_core,
     DivisionViewSet,
 )
 
@@ -35,19 +33,8 @@ router.register(
     r"student-enrollments", StudentEnrollmentViewSet, basename="student-enrollment"
 )
 router.register(r"admin-users", AdminUserViewSet, basename="admin-user")
-router.register(r"api-faculties", APIFacultyViewSet, basename="api-faculty")
 router.register(r"api-students", APIStudentViewSet, basename="api-student")
 router.register(r"api-papers", APIPaperViewSet, basename="api-paper")
-router.register(
-    r"api-student-academic-info",
-    APIStudentAcademicInformationViewSet,
-    basename="api-student-academic-info",
-)
-router.register(
-    r"api-student-part-term-paper-map",
-    APIStudentPartTermPaperMapViewSet,
-    basename="api-student-part-term-paper-map",
-)
 router.register(r"divisions", DivisionViewSet, basename="division")
 
 urlpatterns = [
@@ -55,6 +42,7 @@ urlpatterns = [
     path("admin/login/", admin_login, name="admin-login"),
     path("admin/token/refresh/", TokenRefreshView.as_view(), name="token-refresh"),
     path("admin/sync/msuis/", sync_msuis_payload, name="sync-msuis-payload"),
+    path("admin/sync/staging/", sync_staging_to_core, name="sync-staging-to-core"),
     # CRUD APIs
     path("admin/stats/", get_dashboard_stats, name="admin-stats"),
     path("admin/", include(router.urls)),

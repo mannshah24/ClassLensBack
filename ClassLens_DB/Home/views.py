@@ -91,7 +91,7 @@ def registerNewTeacher(request, *args, **kwargs):
     except Exception as e:
         traceback.print_exc()
         return Response(
-            {"detail": "Method not allowed"}, status=status.HTTP_405_METHOD_NOT_ALLOWED
+            {"detail": f"Error registering teacher: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
 
 @api_view(["POST"])
@@ -107,6 +107,14 @@ def validateStudent(request, *args, **kwargs):
 
     try:
         student = Student.objects.get(prn=prn)
+        
+        # Check if password_hash exists before attempting to verify
+        if student.password_hash is None:
+            return Response(
+                {"detail": "Student account not fully registered. Please set a password first."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        
         if not check_password(password, student.password_hash):
             return Response(
                 {"detail": "Invalid password"}, status=status.HTTP_400_BAD_REQUEST
@@ -123,8 +131,8 @@ def validateStudent(request, *args, **kwargs):
     except Exception as e:
         traceback.print_exc()
         return Response(
-            {"detail": "Method not allowed"},
-            status=status.HTTP_405_METHOD_NOT_ALLOWED,
+            {"detail": f"Error validating student: {str(e)}"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 
 @api_view(["POST"])
@@ -161,7 +169,8 @@ def validateTeacher(request, *args, **kwargs):
     except Exception as e:
         traceback.print_exc()
         return Response(
-            {"detail": "Method not allowed"}, status=status.HTTP_405_METHOD_NOT_ALLOWED
+            {"detail": f"Error validating teacher: {str(e)}"}, 
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
 
 @api_view(["POST"])
@@ -177,12 +186,27 @@ def get_subject_details(request, *args, **kwargs):
             )
             subjects = subject_from_dept.subject.all()
             subjects = SubjectSerializer(subjects, many=True).data
-            return Response({"subjects": subjects,"message":"subject details"}, status=status.HTTP_200_OK)
+            divisions = Division.objects.filter(
+                department=department,
+                year=year,
+            ).order_by("name")
+            divisions_data = [
+                {
+                    "id": division.id,
+                    "name": division.name,
+                    "year": division.year,
+                }
+                for division in divisions
+            ]
+            return Response(
+                {"subjects": subjects, "divisions": divisions_data, "message": "subject details"},
+                status=status.HTTP_200_OK,
+            )
         except Exception as e:
             traceback.print_exc()
             return Response(
-                {"detail": "Something went wrong"},
-                status=status.HTTP_405_METHOD_NOT_ALLOWED,
+                {"detail": f"Error getting subject details: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
 @api_view(["POST"])
@@ -371,6 +395,46 @@ def verify_otp(request, *args, **kwargs):
             status=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 
+def _update_student_password(prn, password, photo):
+    if prn is None or password is None:
+        return Response(
+            {"detail": "PRN and Password are required"},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    student = Student.objects.filter(prn=prn).first()
+    if not student:
+        return Response(
+            {"detail": "No Student found with this prn"},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+    student.password_hash = make_password(password)
+
+    if photo is not None:
+        try:
+            embedding = registerNewStudent(photo)
+            if isinstance(embedding, Exception):
+                raise Exception("Face embedding error: " + str(embedding))
+            student.face_embedding = [float(value) for value in embedding]
+        except Exception:
+            return Response(
+                {"error": "Face Not Detected, Upload A New Image"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+    student.save()
+    print(f"✓ Student password set successfully for PRN {prn}")
+    print(f"  Hash (first 20 chars): {student.password_hash[:20]}...")
+
+    verify = Student.objects.get(prn=prn)
+    if verify.password_hash:
+        print(f"✓ Verified: Password hash persisted in database for PRN {prn}")
+        return Response({"message": "Student password set successfully"}, status=200)
+
+    print(f"✗ ERROR: Password hash is None after save for PRN {prn}!")
+    return Response({"detail": "Failed to persist password"}, status=500)
+
 @api_view(["POST"])
 def set_password(request, *args, **kwargs):
     try:
@@ -386,42 +450,39 @@ def set_password(request, *args, **kwargs):
             if teacher : 
                 teacher.password_hash = make_password(password)
                 teacher.save()
-                print("Teacher password set successfully")
-                return Response({"message": "Teacher password set successfully"}, status=200)
+                print(f"✓ Teacher password set successfully for {email}")
+                print(f"  Hash (first 20 chars): {teacher.password_hash[:20]}...")
+                
+                # Verify it was saved to DB
+                verify = Teacher.objects.get(email=email)
+                if verify.password_hash:
+                    print(f"✓ Verified: Password hash persisted in database")
+                    return Response({"message": "Teacher password set successfully"}, status=200)
+                else:
+                    print(f"✗ ERROR: Password hash is None after save!")
+                    return Response({"detail": "Failed to persist password"}, status=500)
             else : 
                 return Response({"detail": "No Teacher found with this email"}, status=status.HTTP_404_NOT_FOUND)
         
         elif request.data.get("prn"):
-            prn=request.data.get("prn")
-            if prn is None or password is None:
-                return Response(
-                    {"detail": "PRN and Password are required"},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-            
-            student = Student.objects.filter(prn=prn).first()
-            if student : 
-                student.password_hash = make_password(password)
-                try : 
-                    embedding=registerNewStudent(request.FILES.get("photo"))
-                    if not isinstance(embedding,Exception):
-                        student.face_embedding = embedding
-                    else : 
-                        raise Exception("Face embedding error: " + str(embedding))
-                except Exception as e :
-                    return Response({"error": "Face Not Detected, Upload A New Image"}, status=status.HTTP_400_BAD_REQUEST)
-                student.save()
-                print("Student password set successfully")
-                return Response({"message": "Student password set successfully"}, status=200)
-            else:
-                return Response({"detail": "No Student found with this prn"}, status=status.HTTP_404_NOT_FOUND)
+            prn = request.data.get("prn")
+            photo = request.FILES.get("photo")
+            return _update_student_password(prn, password, photo)
 
     except Exception as e:
         traceback.print_exc()
+        print(f"✗ Exception in set_password: {str(e)}")
         return Response(
-            {"detail": "An error occurred while updating the password"},
+            {"detail": f"An error occurred while updating the password: {str(e)}"},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
+
+@api_view(["POST"])
+def register_student(request, *args, **kwargs):
+    prn = request.data.get("prn")
+    password = request.data.get("password")
+    photo = request.FILES.get("photo")
+    return _update_student_password(prn, password, photo)
     
 def registerNewStudent(photo):
 
@@ -441,7 +502,7 @@ def registerNewStudent(photo):
             enforce_detection=True,
         )[0]["embedding"]
 
-        return image_embedding
+        return [float(value) for value in image_embedding]
     except ValueError as ve:
         return ValueError(ve)
 
@@ -474,6 +535,54 @@ def get_student_attendance(request, *args, **kwargs):
 
         return Response(
             {"attendance": result},
+            status=status.HTTP_200_OK,
+        )
+
+    except Exception as e:
+        traceback.print_exc()
+        return Response(
+            {"detail": "Something went wrong"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+@api_view(["GET"])
+def get_student_subject_attendance(request, subject_id, *args, **kwargs):
+    try:
+        division_id = request.query_params.get("division_id")
+        year = request.query_params.get("year")
+        semester = request.query_params.get("semester")
+
+        records = AttendanceRecord.objects.filter(
+            class_session__subject_id=subject_id
+        ).select_related(
+            "student",
+            "student__division",
+            "class_session",
+        )
+
+        if division_id:
+            records = records.filter(student__division_id=division_id)
+        if year:
+            records = records.filter(class_session__year=year)
+        # Division no longer stores semester; skip filtering by division.semester
+
+        results = []
+        for record in records:
+            results.append(
+                {
+                    "class_session_id": record.class_session_id,
+                    "student_id": record.student_id,
+                    "student_name": record.student.name,
+                    "student_prn": record.student.prn,
+                    "status": record.status,
+                    "marked_at": record.marked_at.isoformat(),
+                    "class_datetime": record.class_session.class_datetime.isoformat(),
+                    "division_id": record.student.division_id,
+                }
+            )
+
+        return Response(
+            {"attendance_records": results},
             status=status.HTTP_200_OK,
         )
 
@@ -523,16 +632,29 @@ def mark_attendance(request, *args, **kwargs):
         return Response({"error": "Invalid teacher ID (0). Please log in again."}, status=400)
 
     try:
-        division = None
+        teacher_subject_qs = TeacherSubject.objects.filter(
+            teacher_id=teacher_id,
+            subject_id=subject_id,
+        )
+
         if division_id:
-            division = get_object_or_404(Division, id=division_id)
+            teacher_subject_qs = teacher_subject_qs.filter(division_id=division_id)
+
+        if not teacher_subject_qs.exists():
+            return Response(
+                {"error": "Teacher is not mapped to this subject/division"},
+                status=400,
+            )
+
+        resolved_division_id = int(division_id) if division_id else None
+        if resolved_division_id is None and teacher_subject_qs.count() == 1:
+            resolved_division_id = teacher_subject_qs.first().division_id
 
         class_session = ClassSession.objects.create(
             department = get_object_or_404(Department, name=departmentName),
             year = year,
             subject = get_object_or_404(Subject, id=subject_id),
             teacher = get_object_or_404(Teacher, id=teacher_id),
-            division=division,
             class_datetime = datetime.now(),
         )
 
@@ -546,7 +668,13 @@ def mark_attendance(request, *args, **kwargs):
                 photo=photo
             )
 
-        task = evaluate_attendance.delay(total_sessions,class_session.id,request.scheme,"14.139.121.110:11020")
+        task = evaluate_attendance.delay(
+            total_sessions,
+            class_session.id,
+            request.scheme,
+            "14.139.121.110:11020",
+            resolved_division_id,
+        )
 
         return Response({
             "message": "Attendance processing started. You will be notified once it's done.",
@@ -567,26 +695,34 @@ def mark_attendance(request, *args, **kwargs):
     #     "task_id": task.id
     # }, status=202)
 
-@api_view(["POST"])
-def teacher_subjects(request,*args, **kwargs):
-    teacher_id = request.data.get("teacher_id")
+@api_view(["GET", "POST"])
+def teacher_subjects(request, *args, **kwargs):
+    teacher_id = (
+        request.query_params.get("teacher_id")
+        if request.method == "GET"
+        else request.data.get("teacher_id")
+    )
     if not teacher_id:
         return Response({"error": "Teacher ID is required"}, status=400)
     try:
-        subjects = TeacherSubject.objects.filter(teacher_id=teacher_id).values(
-            'subject__id', 
-            'subject__code', 
-            'subject__name'
+        subjects = TeacherSubject.objects.filter(teacher_id=teacher_id).select_related(
+            "subject",
+            "division",
         )
 
         clean_subjects = [
             {
-                'id': s['subject__id'],
-                'code': s['subject__code'],
-                'name': s['subject__name'],
-                'strength': StudentEnrollment.objects.filter(subject_id=s['subject__id']).count()
+                "id": row.subject_id,
+                "code": row.subject.code,
+                "name": row.subject.name,
+                "division_id": row.division_id,
+                "division_name": row.division.name if row.division else None,
+                "strength": StudentEnrollment.objects.filter(
+                    subject_id=row.subject_id,
+                    student_prn__in=Student.objects.filter(division_id=row.division_id).values_list("prn", flat=True),
+                ).count() if row.division_id else StudentEnrollment.objects.filter(subject_id=row.subject_id).count(),
             }
-            for s in subjects
+            for row in subjects
         ]
         return Response({"subjects": clean_subjects}, status=200)
     except Exception as e:
@@ -673,10 +809,16 @@ def teacher_profile(request,teacher_id, *args, **kwargs):
         return Response({"error": "Teacher ID is required"}, status=400)
     try:
         teacher = get_object_or_404(Teacher, id=teacher_id)
-        total_Subject=TeacherSubject.objects.filter(teacher_id_id=teacher_id).count()
-        total_Student=StudentEnrollment.objects.filter(
-            subject_id__in=TeacherSubject.objects.filter(teacher_id_id=teacher_id).values_list('subject_id', flat=True)
-        ).count()
+        teacher_subject_qs = TeacherSubject.objects.filter(teacher_id_id=teacher_id).select_related("division")
+        total_Subject = teacher_subject_qs.count()
+        total_Student = 0
+        for teacher_subject in teacher_subject_qs:
+            enrollment_qs = StudentEnrollment.objects.filter(subject_id=teacher_subject.subject_id)
+            if teacher_subject.division_id:
+                enrollment_qs = enrollment_qs.filter(
+                    student_prn__in=Student.objects.filter(division_id=teacher_subject.division_id).values_list("prn", flat=True)
+                )
+            total_Student += enrollment_qs.count()
         department = teacher.department.name if teacher.department else None
         profile_data = {
             "name": teacher.name,
@@ -693,6 +835,34 @@ def teacher_profile(request,teacher_id, *args, **kwargs):
             {"detail": "Something went wrong"},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
+
+
+def _resolve_student_semester(student):
+    subject_ids = set(
+        StudentEnrollment.objects.filter(student_prn=student.prn).values_list("subject_id", flat=True)
+    )
+    subject_mappings = (
+        SubjectFromDept.objects.filter(department=student.department, year=student.year)
+        .prefetch_related("subject")
+        .order_by("semester")
+    )
+
+    best_semester = None
+    best_score = -1
+
+    for subject_mapping in subject_mappings:
+        mapped_subject_ids = set(subject_mapping.subject.values_list("id", flat=True))
+        score = len(subject_ids.intersection(mapped_subject_ids))
+
+        if score > best_score:
+            best_score = score
+            best_semester = subject_mapping.semester
+
+    if best_score > 0:
+        return best_semester
+
+    first_mapping = subject_mappings.first()
+    return first_mapping.semester if first_mapping else None
     
 @api_view(['POST'])
 @permission_classes([AllowAny])
@@ -735,6 +905,7 @@ def get_student_dashboard(request, *args, **kwargs):
             )
 
         student = get_object_or_404(Student, id=student_id)
+        semester = _resolve_student_semester(student)
 
         enrollments = StudentEnrollment.objects.filter(student_prn=student.prn).select_related('subject')
 
@@ -751,7 +922,11 @@ def get_student_dashboard(request, *args, **kwargs):
 
             percentage=data.attendancePercentage
 
-            teacher = TeacherSubject.objects.filter(subject=subject).select_related('teacher_id').first()
+            teacher = TeacherSubject.objects.filter(subject=subject, division=student.division).select_related('teacher_id').first()
+            if teacher is None and student.division is not None:
+                teacher = TeacherSubject.objects.filter(subject=subject, division__isnull=True).select_related('teacher_id').first()
+            if teacher is None:
+                teacher = TeacherSubject.objects.filter(subject=subject).select_related('teacher_id').first()
             teacher_name = teacher.teacher_id.name if teacher else "N/A"
 
             subjects_data.append({
@@ -786,6 +961,12 @@ def get_student_dashboard(request, *args, **kwargs):
         return Response({
             "student_name": student.name,
             "prn": student.prn,
+            "email": student.email,
+            "year": student.year,
+            "department_name": student.department.name if student.department else None,
+            "division_id": student.division_id,
+            "division_name": student.division.name if student.division else None,
+            "semester": semester,
             "overall_attendance": overall_percentage,
             "subjects": subjects_data,
             "recent_activity": recent_activity,

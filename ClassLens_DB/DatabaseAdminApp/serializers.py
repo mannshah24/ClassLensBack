@@ -3,14 +3,12 @@
 from rest_framework import serializers
 from Home.models import (
     Department, Teacher, Student, Subject, SubjectFromDept,
-    StudentEnrollment, TeacherSubject, AdminUser
+    StudentEnrollment, TeacherSubject, AdminUser, Division
 )
 from .models import (
-    APIFaculty,
     APIStudent,
     APIPaper,
-    APIStudentAcademicInformation,
-    APIStudentPartTermPaperMap,
+    APIEnrollment,
 )
 
 class DepartmentSerializer(serializers.ModelSerializer):
@@ -28,11 +26,12 @@ class TeacherSerializer(serializers.ModelSerializer):
 
 class StudentSerializer(serializers.ModelSerializer):
     department_name = serializers.CharField(source='department.name', read_only=True)
+    division_name = serializers.CharField(source='division.name', read_only=True)
     
     class Meta:
         model = Student
         fields = ['id', 'prn', 'name', 'email', 'password_hash', 'year', 'department', 
-                  'department_name', 'face_embedding', 'notification_token']
+                  'department_name', 'division', 'division_name', 'face_embedding', 'notification_token']
         extra_kwargs = {'password_hash': {'write_only': True}, 'face_embedding': {'write_only': True}}
 
 class SubjectSerializer(serializers.ModelSerializer):
@@ -63,10 +62,11 @@ class StudentEnrollmentSerializer(serializers.ModelSerializer):
 class TeacherSubjectSerializer(serializers.ModelSerializer):
     teacher_name = serializers.CharField(source='teacher_id.name', read_only=True)
     subject_name = serializers.CharField(source='subject.name', read_only=True)
+    division_name = serializers.CharField(source='division.name', read_only=True)
     
     class Meta:
         model = TeacherSubject
-        fields = ['id', 'teacher_id', 'teacher_name', 'subject', 'subject_name']
+        fields = ['id', 'teacher_id', 'teacher_name', 'subject', 'subject_name', 'division', 'division_name']
 
 # class AdminUserSerializer(serializers.ModelSerializer):
 #     password = serializers.CharField(write_only=True)
@@ -103,12 +103,6 @@ class AdminUserSerializer(serializers.ModelSerializer):
         return user
 
 
-class APIFacultySerializer(serializers.ModelSerializer):
-    class Meta:
-        model = APIFaculty
-        fields = "__all__"
-
-
 class APIStudentSerializer(serializers.ModelSerializer):
     class Meta:
         model = APIStudent
@@ -121,15 +115,9 @@ class APIPaperSerializer(serializers.ModelSerializer):
         fields = "__all__"
 
 
-class APIStudentAcademicInformationSerializer(serializers.ModelSerializer):
+class APIEnrollmentSerializer(serializers.ModelSerializer):
     class Meta:
-        model = APIStudentAcademicInformation
-        fields = "__all__"
-
-
-class APIStudentPartTermPaperMapSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = APIStudentPartTermPaperMap
+        model = APIEnrollment
         fields = "__all__"
 
 
@@ -137,4 +125,4 @@ class DivisionSerializer(serializers.ModelSerializer):
     class Meta:
         from Home.models import Division
         model = Division
-        fields = ['id', 'department', 'program_name', 'year', 'semester', 'name']
+        fields = ['id', 'department', 'year', 'name']
