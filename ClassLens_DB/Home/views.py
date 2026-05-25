@@ -26,6 +26,7 @@ from datetime import datetime
 from django.core.cache import cache
 from django.core.mail import send_mail
 from django.conf import settings
+from django.utils import timezone
 import environ
 import os
 from pathlib import Path
@@ -655,7 +656,7 @@ def mark_attendance(request, *args, **kwargs):
             year = year,
             subject = get_object_or_404(Subject, id=subject_id),
             teacher = get_object_or_404(Teacher, id=teacher_id),
-            class_datetime = datetime.now(),
+            class_datetime = timezone.now(),
         )
 
         total_sessions=ClassSession.objects.filter(
@@ -920,7 +921,12 @@ def get_student_dashboard(request, *args, **kwargs):
                 subject=subject
             ).first()
 
-            percentage=data.attendancePercentage
+            if data is None:
+                percentage = 0
+                present_count = 0
+            else:
+                percentage = data.attendancePercentage
+                present_count = data.present_count
 
             teacher = TeacherSubject.objects.filter(subject=subject, division=student.division).select_related('teacher_id').first()
             if teacher is None and student.division is not None:
@@ -935,20 +941,20 @@ def get_student_dashboard(request, *args, **kwargs):
                 "code": subject.code,
                 "teacher": teacher_name,
                 "total": total_sessions,
-                "attended": data.present_count,
+                "attended": present_count,
                 "percentage": round(float(percentage), 2)
             })
 
         recent_records = AttendanceRecord.objects.filter(
             student=student
-        ).select_related('class_session__subject').order_by('-class_session__class_datetime')[:5]
+        ).select_related('class_session__subject').order_by('-marked_at')[:5]
 
         recent_activity = []
         for record in recent_records:
             recent_activity.append({
                 "subject": record.class_session.subject.name,
                 "status": "Present" if record.status else "Absent",
-                "date": record.class_session.class_datetime.isoformat()
+                "date": record.marked_at.isoformat()
             })
 
         # compute overall attendance across all subjects (weighted by total sessions)

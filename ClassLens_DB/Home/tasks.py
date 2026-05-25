@@ -62,6 +62,7 @@ if torch is not None:
     torch.load = patched_torch_load
 
 from .models import Student, AttendanceRecord, ClassSession, StudentEnrollment, StudentAttendancePercentage
+from django.utils import timezone
 
 # Defer GFPGAN restorer initialization until a task runs to avoid import-time file access
 restorer = None
@@ -285,7 +286,7 @@ def evaluate_attendance(total_sessions, class_session_id: int, scheme, host, div
                     class_session=session,
                     student=student_obj,
                     status=is_present,
-                    marked_at=session.class_datetime
+                    marked_at=timezone.now()
                 )
             )
             
