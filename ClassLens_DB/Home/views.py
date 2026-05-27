@@ -26,6 +26,7 @@ from datetime import datetime
 from django.core.cache import cache
 from django.core.mail import send_mail
 from django.conf import settings
+from django.utils import timezone
 import environ
 import os
 from pathlib import Path
@@ -655,7 +656,7 @@ def mark_attendance(request, *args, **kwargs):
             year = year,
             subject = get_object_or_404(Subject, id=subject_id),
             teacher = get_object_or_404(Teacher, id=teacher_id),
-            class_datetime = datetime.now(),
+            class_datetime = timezone.now(),
         )
 
         total_sessions=ClassSession.objects.filter(
@@ -726,6 +727,97 @@ def teacher_subjects(request, *args, **kwargs):
         ]
         return Response({"subjects": clean_subjects}, status=200)
     except Exception as e:
+        traceback.print_exc()
+        return Response(
+            {"detail": "Something went wrong"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+
+@api_view(["GET", "POST"])
+def teacher_class_sessions(request, *args, **kwargs):
+    teacher_id = (
+        request.query_params.get("teacher_id")
+        if request.method == "GET"
+        else request.data.get("teacher_id")
+    )
+    limit = (
+        request.query_params.get("limit")
+        if request.method == "GET"
+        else request.data.get("limit")
+    )
+
+    if not teacher_id:
+        return Response({"error": "Teacher ID is required"}, status=400)
+
+    try:
+        teacher = get_object_or_404(Teacher, id=teacher_id)
+
+        limit_value = 10
+        if limit not in (None, ""):
+            limit_value = int(limit)
+            if limit_value <= 0:
+                limit_value = 10
+
+        sessions_qs = (
+            ClassSession.objects.filter(teacher=teacher)
+            .select_related("subject", "teacher", "department")
+            .prefetch_related("attendancerecord_set__student__division")
+            .order_by("-class_datetime")
+        )
+
+        if limit_value:
+            sessions_qs = sessions_qs[:limit_value]
+
+        class_sessions = []
+        for session in sessions_qs:
+            attendance_records = list(session.attendancerecord_set.all())
+            present_count = sum(1 for record in attendance_records if record.status)
+            total_count = len(attendance_records)
+            absent_count = total_count - present_count
+
+            division_names = sorted(
+                {
+                    record.student.division.name
+                    for record in attendance_records
+                    if record.student and record.student.division_id
+                }
+            )
+
+            division_name = division_names[0] if len(division_names) == 1 else None
+            if division_name is None:
+                teacher_subject = (
+                    TeacherSubject.objects.filter(
+                        teacher_id=teacher,
+                        subject_id=session.subject_id,
+                    )
+                    .select_related("division")
+                    .order_by("id")
+                    .first()
+                )
+                division_name = (
+                    teacher_subject.division.name
+                    if teacher_subject and teacher_subject.division
+                    else None
+                )
+
+            class_sessions.append(
+                {
+                    "class_session_id": session.id,
+                    "subject_name": session.subject.name,
+                    "division_name": division_name or "All Divisions",
+                    "class_datetime": session.class_datetime.isoformat(),
+                    "present_count": present_count,
+                    "absent_count": absent_count,
+                    "total_count": total_count,
+                }
+            )
+
+        return Response({"class_sessions": class_sessions}, status=status.HTTP_200_OK)
+
+    except ValueError:
+        return Response({"error": "limit must be an integer"}, status=400)
+    except Exception:
         traceback.print_exc()
         return Response(
             {"detail": "Something went wrong"},
@@ -920,7 +1012,12 @@ def get_student_dashboard(request, *args, **kwargs):
                 subject=subject
             ).first()
 
-            percentage=data.attendancePercentage
+            if data is None:
+                percentage = 0
+                present_count = 0
+            else:
+                percentage = data.attendancePercentage
+                present_count = data.present_count
 
             teacher = TeacherSubject.objects.filter(subject=subject, division=student.division).select_related('teacher_id').first()
             if teacher is None and student.division is not None:
@@ -935,20 +1032,20 @@ def get_student_dashboard(request, *args, **kwargs):
                 "code": subject.code,
                 "teacher": teacher_name,
                 "total": total_sessions,
-                "attended": data.present_count,
+                "attended": present_count,
                 "percentage": round(float(percentage), 2)
             })
 
         recent_records = AttendanceRecord.objects.filter(
             student=student
-        ).select_related('class_session__subject').order_by('-class_session__class_datetime')[:5]
+        ).select_related('class_session__subject').order_by('-marked_at')[:5]
 
         recent_activity = []
         for record in recent_records:
             recent_activity.append({
                 "subject": record.class_session.subject.name,
                 "status": "Present" if record.status else "Absent",
-                "date": record.class_session.class_datetime.isoformat()
+                "date": record.marked_at.isoformat()
             })
 
         # compute overall attendance across all subjects (weighted by total sessions)
