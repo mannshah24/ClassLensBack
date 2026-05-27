@@ -733,6 +733,97 @@ def teacher_subjects(request, *args, **kwargs):
             status=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 
+
+@api_view(["GET", "POST"])
+def teacher_class_sessions(request, *args, **kwargs):
+    teacher_id = (
+        request.query_params.get("teacher_id")
+        if request.method == "GET"
+        else request.data.get("teacher_id")
+    )
+    limit = (
+        request.query_params.get("limit")
+        if request.method == "GET"
+        else request.data.get("limit")
+    )
+
+    if not teacher_id:
+        return Response({"error": "Teacher ID is required"}, status=400)
+
+    try:
+        teacher = get_object_or_404(Teacher, id=teacher_id)
+
+        limit_value = 10
+        if limit not in (None, ""):
+            limit_value = int(limit)
+            if limit_value <= 0:
+                limit_value = 10
+
+        sessions_qs = (
+            ClassSession.objects.filter(teacher=teacher)
+            .select_related("subject", "teacher", "department")
+            .prefetch_related("attendancerecord_set__student__division")
+            .order_by("-class_datetime")
+        )
+
+        if limit_value:
+            sessions_qs = sessions_qs[:limit_value]
+
+        class_sessions = []
+        for session in sessions_qs:
+            attendance_records = list(session.attendancerecord_set.all())
+            present_count = sum(1 for record in attendance_records if record.status)
+            total_count = len(attendance_records)
+            absent_count = total_count - present_count
+
+            division_names = sorted(
+                {
+                    record.student.division.name
+                    for record in attendance_records
+                    if record.student and record.student.division_id
+                }
+            )
+
+            division_name = division_names[0] if len(division_names) == 1 else None
+            if division_name is None:
+                teacher_subject = (
+                    TeacherSubject.objects.filter(
+                        teacher_id=teacher,
+                        subject_id=session.subject_id,
+                    )
+                    .select_related("division")
+                    .order_by("id")
+                    .first()
+                )
+                division_name = (
+                    teacher_subject.division.name
+                    if teacher_subject and teacher_subject.division
+                    else None
+                )
+
+            class_sessions.append(
+                {
+                    "class_session_id": session.id,
+                    "subject_name": session.subject.name,
+                    "division_name": division_name or "All Divisions",
+                    "class_datetime": session.class_datetime.isoformat(),
+                    "present_count": present_count,
+                    "absent_count": absent_count,
+                    "total_count": total_count,
+                }
+            )
+
+        return Response({"class_sessions": class_sessions}, status=status.HTTP_200_OK)
+
+    except ValueError:
+        return Response({"error": "limit must be an integer"}, status=400)
+    except Exception:
+        traceback.print_exc()
+        return Response(
+            {"detail": "Something went wrong"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
 @api_view(["POST"])
 def get_present_absent_list(request, *args, **kwargs):
     class_session_id = request.data.get("class_session_id")
