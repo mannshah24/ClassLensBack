@@ -2,22 +2,12 @@ from rest_framework import status
 import string
 from django.db.models import F
 from rest_framework.decorators import api_view, parser_classes,permission_classes
-# defer heavy/optional imports so Django can run management commands without GPU/deep libs
-try:
-    from deepface import DeepFace
-except Exception:
-    DeepFace = None
-try:
-    from PIL import Image
-except Exception:
-    Image = None
-import numpy as np
 from rest_framework.response import Response
 from .models import Department, Student, Teacher, SubjectFromDept, StudentAttendancePercentage,AttendanceRecord, StudentEnrollment,TeacherSubject, ClassSession, Subject,AttendancePhotos,AdminUser, Division
 from django.db.models import Count, Q
 from .serializers import DepartmentSerializer,SubjectSerializer
 from rest_framework.parsers import MultiPartParser
-from rest_framework_simplejwt.tokens import RefreshToken
+from rest_framework_simplejwt.tokens import RefreshToken, AccessToken
 from django.contrib.auth.hashers import make_password, check_password
 from django.shortcuts import get_object_or_404
 import traceback
@@ -38,6 +28,8 @@ try:
     import matplotlib.pyplot as plt
 except Exception:
     plt = None
+
+from .face_utils import extract_face_embedding
 import uuid
 from .tasks import evaluate_attendance, send_attendance_notifications
 from django.core.files.storage import default_storage
@@ -121,8 +113,20 @@ def validateStudent(request, *args, **kwargs):
                 {"detail": "Invalid password"}, status=status.HTTP_400_BAD_REQUEST
             )
         else:
+            # Issue a simple JWT-like token so frontend can authenticate subsequent requests
+            refresh = RefreshToken()
+            refresh['student_id'] = student.id
+            refresh['prn'] = student.prn
+
             return Response(
-                {"message": "Student validated successfully", "student_id": student.id, 'student_name': student.name, 'prn': student.prn},
+                {
+                    "message": "Student validated successfully",
+                    "student_id": student.id,
+                    "student_name": student.name,
+                    "prn": student.prn,
+                    "access": str(refresh.access_token),
+                    "refresh": str(refresh),
+                },
                 status=status.HTTP_200_OK,
             )
     except Student.DoesNotExist:
@@ -414,13 +418,11 @@ def _update_student_password(prn, password, photo):
 
     if photo is not None:
         try:
-            embedding = registerNewStudent(photo)
-            if isinstance(embedding, Exception):
-                raise Exception("Face embedding error: " + str(embedding))
+            embedding = extract_face_embedding(photo)
             student.face_embedding = [float(value) for value in embedding]
-        except Exception:
+        except ValueError as exc:
             return Response(
-                {"error": "Face Not Detected, Upload A New Image"},
+                {"error": str(exc)},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -483,29 +485,80 @@ def register_student(request, *args, **kwargs):
     prn = request.data.get("prn")
     password = request.data.get("password")
     photo = request.FILES.get("photo")
+
+    if password is None and photo is not None:
+        student = Student.objects.filter(prn=prn).first()
+        if not student:
+            return Response(
+                {"detail": "No Student found with this prn"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        try:
+            embedding = extract_face_embedding(photo)
+            student.face_embedding = [float(value) for value in embedding]
+            student.save(update_fields=["face_embedding"])
+            return Response({"message": "Student face updated successfully"}, status=200)
+        except ValueError as exc:
+            return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
     return _update_student_password(prn, password, photo)
     
 def registerNewStudent(photo):
+    return extract_face_embedding(photo)
 
-    if not photo:
-        return Response(
-            {"error": "No photo uploaded"}, status=status.HTTP_400_BAD_REQUEST
-        )
 
+@api_view(["POST"])
+def update_face(request, *args, **kwargs):
+    """POST /api/updateFace/ - multipart/form-data: prn, photo
+
+    Updates only the student's `face_embedding` without changing password or other fields.
+    """
     try:
-        image = Image.open(photo)
-        image = image.convert("RGB")
-        img_arr = np.array(image)
-        image_embedding = DeepFace.represent(
-            img_path=img_arr,
-            model_name="Facenet512",
-            detector_backend="retinaface",
-            enforce_detection=True,
-        )[0]["embedding"]
+        # Prefer authenticated student identity if provided via Bearer token
+        prn = None
+        auth_header = request.META.get('HTTP_AUTHORIZATION') or request.headers.get('Authorization')
+        if auth_header:
+            parts = auth_header.split()
+            if len(parts) == 2 and parts[0].lower() == 'bearer':
+                token = parts[1]
+                try:
+                    payload = AccessToken(token)
+                    prn = payload.get('prn') or payload.get('student_prn') or payload.get('student_id')
+                    # If student_id found, map to prn
+                    if isinstance(prn, int) and not payload.get('prn'):
+                        # prn may be student id - fetch actual prn
+                        student_obj = Student.objects.filter(id=prn).first()
+                        if student_obj:
+                            prn = student_obj.prn
+                except Exception:
+                    prn = None
 
-        return [float(value) for value in image_embedding]
-    except ValueError as ve:
-        return ValueError(ve)
+        if prn is None:
+            prn = request.POST.get("prn") or request.data.get("prn")
+        photo = request.FILES.get("photo")
+
+        if prn is None:
+            return Response({"detail": "prn is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        if photo is None:
+            return Response({"detail": "photo file is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        student = Student.objects.filter(prn=prn).first()
+        if not student:
+            return Response({"detail": "No Student found with this prn"}, status=status.HTTP_404_NOT_FOUND)
+
+        try:
+            embedding = extract_face_embedding(photo)
+            student.face_embedding = [float(value) for value in embedding]
+            student.save(update_fields=["face_embedding"])
+            return Response({"message": "Student face updated successfully"}, status=200)
+        except ValueError as exc:
+            return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+    except Exception as e:
+        traceback.print_exc()
+        return Response({"detail": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 @api_view(["POST"])
 def get_student_attendance(request, *args, **kwargs):
@@ -673,7 +726,7 @@ def mark_attendance(request, *args, **kwargs):
             total_sessions,
             class_session.id,
             request.scheme,
-            "14.139.121.110:11020",
+            request.get_host(),
             resolved_division_id,
         )
 

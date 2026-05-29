@@ -1,10 +1,12 @@
 # serializers.py
 
+from django.db import transaction
 from rest_framework import serializers
 from Home.models import (
     Department, Teacher, Student, Subject, SubjectFromDept,
     StudentEnrollment, TeacherSubject, AdminUser, Division
 )
+from Home.face_utils import extract_face_embedding
 from .models import (
     APIStudent,
     APIPaper,
@@ -27,12 +29,48 @@ class TeacherSerializer(serializers.ModelSerializer):
 class StudentSerializer(serializers.ModelSerializer):
     department_name = serializers.CharField(source='department.name', read_only=True)
     division_name = serializers.CharField(source='division.name', read_only=True)
+    photo = serializers.ImageField(write_only=True, required=False, allow_null=True)
     
     class Meta:
         model = Student
         fields = ['id', 'prn', 'name', 'email', 'password_hash', 'year', 'department', 
-                  'department_name', 'division', 'division_name', 'face_embedding', 'notification_token']
+                  'department_name', 'division', 'division_name', 'face_embedding', 'notification_token', 'photo']
         extra_kwargs = {'password_hash': {'write_only': True}, 'face_embedding': {'write_only': True}}
+
+    def _apply_face_photo(self, instance, photo):
+        if photo is None:
+            return
+
+        embedding = extract_face_embedding(photo)
+        instance.face_embedding = [float(value) for value in embedding]
+
+    def create(self, validated_data):
+        photo = validated_data.pop('photo', None)
+        try:
+            with transaction.atomic():
+                student = super().create(validated_data)
+
+                if photo is not None:
+                    self._apply_face_photo(student, photo)
+                    student.save(update_fields=['face_embedding'])
+
+                return student
+        except ValueError as exc:
+            raise serializers.ValidationError({'photo': str(exc)}) from exc
+
+    def update(self, instance, validated_data):
+        photo = validated_data.pop('photo', None)
+        try:
+            with transaction.atomic():
+                student = super().update(instance, validated_data)
+
+                if photo is not None:
+                    self._apply_face_photo(student, photo)
+                    student.save(update_fields=['face_embedding'])
+
+                return student
+        except ValueError as exc:
+            raise serializers.ValidationError({'photo': str(exc)}) from exc
 
 class SubjectSerializer(serializers.ModelSerializer):
     class Meta:
