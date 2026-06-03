@@ -4,6 +4,7 @@ from rest_framework.response import Response
 import uuid
 from django.conf import settings
 from django.http import request
+from urllib.parse import urljoin
 import numpy as np
 from scipy.spatial.distance import cosine
 import json
@@ -271,8 +272,9 @@ def evaluate_attendance(total_sessions, class_session_id: int, scheme, host, div
         filename = f"detected_{unique_id}.jpg"
         save_path = output_dir / filename
         cv2.imwrite(str(save_path), img_bgr)
-        
-        image_urls.append(f"{scheme}://{host}/media/images/{filename}")
+
+        base_url = f"{scheme}://{host.rstrip('/')}"
+        image_urls.append(urljoin(f"{base_url}/", f"media/images/{filename}"))
 
     records_to_create = []
     student_notification_list = [] 

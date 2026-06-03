@@ -57,6 +57,15 @@ test_sync_endpoint.py
 
 # Local schema/docs
 New_schema
+data-1778222711514.csv
+API_ENDPOINTS.md
+ARCHITECTURE_RULES.md
+DATABASE_SCHEMA.md
+db-chat.txt
+DBMSUIS_V7_utf8.sql
+DBMSUIS_V7.sql
+RABBITMQ_MIGRATION.md
+setup_backend.bat
 
 # Python virtual env
 .venv/
