@@ -564,6 +564,7 @@ def update_face(request, *args, **kwargs):
 def get_student_attendance(request, *args, **kwargs):
     try:
         subject_id = request.data.get("subject_id")
+        division_id = request.data.get("division_id")
 
         if subject_id is None:
             return Response(
@@ -571,20 +572,40 @@ def get_student_attendance(request, *args, **kwargs):
                 status=status.HTTP_400_BAD_REQUEST,
             )
         
-        total_sessions = ClassSession.objects.filter(subject_id=subject_id).count()
+        # Fetch enrolled student PRNs from StudentEnrollment
+        enrolled_prns = StudentEnrollment.objects.filter(subject_id=subject_id).values_list('student_prn', flat=True)
 
-        attendance_data = StudentAttendancePercentage.objects.filter(
-            subject_id=subject_id
-        ).select_related('student')
+        # Get Student records and annotate them with real total and attended counts from AttendanceRecord
+        students = Student.objects.filter(prn__in=enrolled_prns).annotate(
+            real_total_classes=Count(
+                'attendancerecord',
+                filter=Q(attendancerecord__class_session__subject_id=subject_id)
+            ),
+            real_attended_classes=Count(
+                'attendancerecord',
+                filter=Q(attendancerecord__class_session__subject_id=subject_id, attendancerecord__status=True)
+            )
+        )
+        if division_id:
+            students = students.filter(division_id=division_id)
 
         result = []
-        for record in attendance_data:
+        for student in students:
+            total = student.real_total_classes
+            attended = student.real_attended_classes
+            
+            percentage = 0.0
+            if total > 0:
+                percentage = (attended * 100.0) / total
+                if percentage > 100.0:
+                    percentage = 100.0
+            
             result.append({
-                "student_id": record.student.id,
-                "student_name": record.student.name,
-                "total_classes": total_sessions,
-                "attended_classes": record.present_count,
-                "attendance_percentage": record.attendancePercentage
+                "student_id": student.id,
+                "student_name": student.name,
+                "total_classes": total,
+                "attended_classes": attended,
+                "attendance_percentage": percentage
             })
 
         return Response(
@@ -1072,11 +1093,22 @@ def get_student_dashboard(request, *args, **kwargs):
                 percentage = data.attendancePercentage
                 present_count = data.present_count
 
-            teacher = TeacherSubject.objects.filter(subject=subject, division=student.division).select_related('teacher_id').first()
-            if teacher is None and student.division is not None:
-                teacher = TeacherSubject.objects.filter(subject=subject, division__isnull=True).select_related('teacher_id').first()
-            if teacher is None:
-                teacher = TeacherSubject.objects.filter(subject=subject).select_related('teacher_id').first()
+            teacher = None
+            if student.division is not None:
+                teacher = TeacherSubject.objects.filter(
+                    subject=subject,
+                    division=student.division
+                ).select_related('teacher_id').first()
+                if teacher is None:
+                    teacher = TeacherSubject.objects.filter(
+                        subject=subject,
+                        division__isnull=True
+                    ).select_related('teacher_id').first()
+            else:
+                teacher = TeacherSubject.objects.filter(
+                    subject=subject
+                ).select_related('teacher_id').first()
+
             teacher_name = teacher.teacher_id.name if teacher else "N/A"
 
             subjects_data.append({
