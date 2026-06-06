@@ -112,6 +112,7 @@ class ClassSession(models.Model):
 class AttendancePhotos(models.Model):
     class_session = models.ForeignKey(ClassSession, on_delete=models.CASCADE,related_name='photos')
     photo = models.ImageField(upload_to='attendance_photos/')
+    detected_photo = models.ImageField(upload_to='detected_photos/', null=True, blank=True)
     uploaded_at = models.DateTimeField(auto_now_add=True)
 
 class AttendanceRecord(models.Model):

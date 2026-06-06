@@ -1,7 +1,7 @@
 from django.urls import path, re_path
 from django.urls import include
 
-from Home.views import getDepartments,mark_attendance,teacher_profile,registerNewTeacher,validateStudent,validateTeacher,send_otp,verify_otp,set_password,get_subject_details,verify_email, verify_prn, get_student_attendance,attendance_status,teacher_subjects,teacher_class_sessions, get_present_absent_list,change_attendance,get_student_dashboard,update_notification_token,remove_notification_token, register_student, get_student_subject_attendance, update_face
+from Home.views import getDepartments,mark_attendance,teacher_profile,registerNewTeacher,validateStudent,validateTeacher,send_otp,verify_otp,set_password,get_subject_details,verify_email, verify_prn, get_student_attendance,attendance_status,teacher_subjects,teacher_class_sessions, get_present_absent_list,change_attendance,get_student_dashboard,update_notification_token,remove_notification_token, register_student, get_student_subject_attendance, update_face, get_session_photos
 from django.conf import settings
 from django.conf.urls.static import static
 
@@ -48,6 +48,11 @@ urlpatterns = [
         r"^student/notification-token/remove/?$",
         remove_notification_token,
         name="remove_notification_token",
+    ),
+    re_path(
+        r"^getSessionPhotos/(?P<session_id>\d+)/?$",
+        get_session_photos,
+        name="get_session_photos",
     ),
 ]
 

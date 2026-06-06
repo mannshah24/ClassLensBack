@@ -785,20 +785,66 @@ def teacher_subjects(request, *args, **kwargs):
             "division",
         )
 
-        clean_subjects = [
-            {
+        clean_subjects = []
+        for row in subjects:
+            dept_name = None
+            year = None
+            semester = None
+
+            # 1. Try to get department and year from division if set
+            if row.division:
+                dept_name = row.division.department.name
+                year = row.division.year
+                
+                # Try to resolve semester from SubjectFromDept with matching department and year
+                sfd = SubjectFromDept.objects.filter(
+                    subject=row.subject_id, 
+                    department=row.division.department, 
+                    year=row.division.year
+                ).first()
+                if sfd:
+                    semester = sfd.semester
+            
+            # 2. If division was not set or semester/dept/year not found, fallback to subject's department or SubjectFromDept mapping
+            if not dept_name or not year or not semester:
+                sfd_qs = SubjectFromDept.objects.filter(subject=row.subject_id)
+                if row.subject.department:
+                    sfd_qs = sfd_qs.filter(department=row.subject.department)
+                sfd = sfd_qs.first() or SubjectFromDept.objects.filter(subject=row.subject_id).first()
+                
+                if sfd:
+                    if not dept_name:
+                        dept_name = sfd.department.name
+                    if not year:
+                        year = sfd.year
+                    if not semester:
+                        semester = sfd.semester
+
+            # 3. Last fallbacks
+            if not dept_name:
+                dept_name = row.subject.department.name if row.subject.department else (row.teacher_id.department.name if row.teacher_id.department else "General")
+            if not year:
+                year = 1
+            if not semester:
+                semester = 1
+
+            strength = StudentEnrollment.objects.filter(
+                subject_id=row.subject_id,
+                student_prn__in=Student.objects.filter(division_id=row.division_id).values_list("prn", flat=True),
+            ).count() if row.division_id else StudentEnrollment.objects.filter(subject_id=row.subject_id).count()
+
+            clean_subjects.append({
                 "id": row.subject_id,
                 "code": row.subject.code,
                 "name": row.subject.name,
                 "division_id": row.division_id,
                 "division_name": row.division.name if row.division else None,
-                "strength": StudentEnrollment.objects.filter(
-                    subject_id=row.subject_id,
-                    student_prn__in=Student.objects.filter(division_id=row.division_id).values_list("prn", flat=True),
-                ).count() if row.division_id else StudentEnrollment.objects.filter(subject_id=row.subject_id).count(),
-            }
-            for row in subjects
-        ]
+                "department_name": dept_name,
+                "year": year,
+                "semester": semester,
+                "strength": strength,
+            })
+
         return Response({"subjects": clean_subjects}, status=200)
     except Exception as e:
         traceback.print_exc()
@@ -1231,3 +1277,26 @@ def health(request,*args,**kwargs):
         {"message":"ok"},
         status=200
     )
+
+@api_view(["GET"])
+def get_session_photos(request, session_id, *args, **kwargs):
+    from urllib.parse import urljoin
+    try:
+        photos = AttendancePhotos.objects.filter(class_session_id=session_id).order_by('id')
+        base_url = f"{request.scheme}://{request.get_host().rstrip('/')}"
+        
+        results = []
+        for p in photos:
+            photo_url = urljoin(f"{base_url}/", p.photo.url)
+            detected_photo_url = urljoin(f"{base_url}/", p.detected_photo.url) if p.detected_photo else photo_url
+            
+            results.append({
+                "id": p.id,
+                "original_url": photo_url,
+                "detected_url": detected_photo_url,
+            })
+            
+        return Response({"photos": results}, status=200)
+    except Exception as e:
+        traceback.print_exc()
+        return Response({"error": str(e)}, status=500)

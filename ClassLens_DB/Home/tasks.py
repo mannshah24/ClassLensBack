@@ -183,7 +183,7 @@ def evaluate_attendance(total_sessions, class_session_id: int, scheme, host, div
             known_embeddings[s.prn] = emb
 
     present_student_prns = set()
-    output_dir = settings.MEDIA_ROOT / 'images'
+    output_dir = settings.MEDIA_ROOT / 'detected_photos'
     output_dir.mkdir(parents=True, exist_ok=True)
 
     for img_obj in images:
@@ -273,8 +273,12 @@ def evaluate_attendance(total_sessions, class_session_id: int, scheme, host, div
         save_path = output_dir / filename
         cv2.imwrite(str(save_path), img_bgr)
 
+        # Save path relative to MEDIA_ROOT in DB record
+        img_obj.detected_photo = f"detected_photos/{filename}"
+        img_obj.save()
+
         base_url = f"{scheme}://{host.rstrip('/')}"
-        image_urls.append(urljoin(f"{base_url}/", f"media/images/{filename}"))
+        image_urls.append(urljoin(f"{base_url}/", f"media/detected_photos/{filename}"))
 
     records_to_create = []
     student_notification_list = [] 
@@ -311,11 +315,12 @@ def evaluate_attendance(total_sessions, class_session_id: int, scheme, host, div
         session.subject.name,
         session.class_datetime
     )
-    print(f"images url {image_urls[0]}")
+    print(f"images url {image_urls[0] if image_urls else None}")
 
     return {
         "num_faces": total_faces,
         "image_url": image_urls[0] if image_urls else None,
+        "image_urls": image_urls,
         "class_session_id": class_session_id,
         "division_id": division_id,
         "present_count": len(present_student_prns),
