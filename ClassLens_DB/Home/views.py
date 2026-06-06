@@ -1300,3 +1300,50 @@ def get_session_photos(request, session_id, *args, **kwargs):
     except Exception as e:
         traceback.print_exc()
         return Response({"error": str(e)}, status=500)
+
+@api_view(["POST"])
+@parser_classes([MultiPartParser])
+def resubmit_attendance(request, *args, **kwargs):
+    from .tasks import evaluate_additional_attendance
+    class_session_id = request.data.get("class_session_id")
+    photos = request.FILES.getlist("photo")
+    
+    if not class_session_id:
+        return Response({"error": "class_session_id is required"}, status=400)
+    if not photos:
+        return Response({"error": "No photos uploaded"}, status=400)
+        
+    try:
+        class_session = get_object_or_404(ClassSession, id=class_session_id)
+        
+        new_photo_ids = []
+        for photo in photos:
+            p = AttendancePhotos.objects.create(
+                class_session=class_session,
+                photo=photo
+            )
+            new_photo_ids.append(p.id)
+            
+        division_id = None
+        teacher_subject = TeacherSubject.objects.filter(
+            teacher_id=class_session.teacher,
+            subject=class_session.subject
+        ).first()
+        if teacher_subject:
+            division_id = teacher_subject.division_id
+            
+        task = evaluate_additional_attendance.delay(
+            class_session.id,
+            new_photo_ids,
+            request.scheme,
+            request.get_host(),
+            division_id,
+        )
+        
+        return Response({
+            "message": "Additional attendance photos processing started.",
+            "task_id": task.id
+        }, status=202)
+    except Exception as e:
+        traceback.print_exc()
+        return Response({"error": f"Failed to start additional attendance processing: {str(e)}"}, status=500)

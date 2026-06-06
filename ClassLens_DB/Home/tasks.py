@@ -327,3 +327,168 @@ def evaluate_attendance(total_sessions, class_session_id: int, scheme, host, div
         "absent_count": len(enrolled_prns) - len(present_student_prns),
         "subject": session.subject.name
     }
+
+@shared_task
+def evaluate_additional_attendance(class_session_id: int, new_photo_ids: list, scheme, host, division_id=None):
+    from .models import AttendancePhotos
+    session = ClassSession.objects.get(id=class_session_id)
+    new_images = AttendancePhotos.objects.filter(id__in=new_photo_ids)
+    
+    # Get all students currently marked as ABSENT for this session
+    absent_records = AttendanceRecord.objects.filter(class_session=session, status=False)
+    absent_student_ids = list(absent_records.values_list('student_id', flat=True))
+    
+    # We only care about students who are currently absent and enrolled
+    all_students_qs = Student.objects.filter(id__in=absent_student_ids)
+    
+    # Map them by prn
+    student_obj_map = {s.prn: s for s in all_students_qs}
+    
+    known_embeddings = {}
+    for s in all_students_qs:
+        if s.face_embedding is not None:
+            emb = s.face_embedding
+            if isinstance(emb, str):
+                emb = json.loads(emb)
+            known_embeddings[s.prn] = emb
+            
+    present_student_prns = set()
+    output_dir = settings.MEDIA_ROOT / 'detected_photos'
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    total_faces = 0
+    image_urls = []
+    
+    for img_obj in new_images:
+        image_path = img_obj.photo.path
+        if not os.path.exists(image_path):
+            continue
+            
+        img_bgr = cv2.imread(image_path)
+        if img_bgr is None:
+            continue
+            
+        try:
+            all_face_data = DeepFace.extract_faces(
+                img_path=img_bgr,
+                detector_backend='retinaface',
+                enforce_detection=True,
+                align=True
+            )
+        except Exception:
+            all_face_data = []
+            
+        total_faces += len(all_face_data)
+        
+        for face_data in all_face_data:
+            face_crop_array = (face_data['face'] * 255).astype(np.uint8)
+            face_crop_bgr = cv2.cvtColor(face_crop_array, cv2.COLOR_RGB2BGR)
+            
+            facial_area = face_data['facial_area']
+            x, y, w, h = facial_area['x'], facial_area['y'], facial_area['w'], facial_area['h']
+            
+            _restorer = get_restorer()
+            if _restorer is not None:
+                try:
+                    _, restored_list, _ = _restorer.enhance(
+                        face_crop_bgr,
+                        has_aligned=False,
+                        only_center_face=True,
+                        paste_back=False,
+                        weight=0.1
+                    )
+                except Exception:
+                    restored_list = []
+            else:
+                restored_list = []
+                
+            face_to_scan = restored_list[0] if restored_list else face_crop_bgr
+            face_to_scan_rgb = cv2.cvtColor(face_to_scan, cv2.COLOR_BGR2RGB)
+            
+            try:
+                embedding_result = DeepFace.represent(
+                    img_path=face_to_scan_rgb,
+                    model_name='Facenet512',
+                    detector_backend='retinaface',
+                    enforce_detection=False,
+                    align=True
+                )
+                captured_embedding = embedding_result[0]['embedding']
+            except Exception:
+                if cv2 is not None:
+                    try:
+                        cv2.rectangle(img_bgr, (x, y), (x + w, y + h), (0, 0, 255), 2)
+                    except Exception:
+                        pass
+                continue
+                
+            best_score = 1.0
+            best_prn = None
+            
+            for prn, known_emb in known_embeddings.items():
+                distance = cosine(known_emb, captured_embedding)
+                if distance < best_score:
+                    best_score = distance
+                    best_prn = prn
+                    
+            if best_score < 0.4:
+                present_student_prns.add(best_prn)
+                cv2.rectangle(img_bgr, (x, y), (x + w, y + h), (0, 255, 0), 2)
+            else:
+                cv2.rectangle(img_bgr, (x, y), (x + w, y + h), (0, 0, 255), 2)
+                
+        unique_id = uuid.uuid4()
+        filename = f"detected_{unique_id}.jpg"
+        save_path = output_dir / filename
+        cv2.imwrite(str(save_path), img_bgr)
+        
+        img_obj.detected_photo = f"detected_photos/{filename}"
+        img_obj.save()
+        
+        base_url = f"{scheme}://{host.rstrip('/')}"
+        image_urls.append(urljoin(f"{base_url}/", f"media/detected_photos/{filename}"))
+        
+    total_sessions = ClassSession.objects.filter(subject=session.subject).count()
+    student_notification_list = []
+    
+    for prn in present_student_prns:
+        student_obj = student_obj_map.get(prn)
+        if student_obj:
+            AttendanceRecord.objects.filter(
+                class_session=session,
+                student=student_obj
+            ).update(status=True, marked_at=timezone.now())
+            
+            student_notification_list.append((student_obj, True))
+            
+            StudentAttendancePercentage.objects.filter(
+                student=student_obj,
+                subject=session.subject
+            ).update(present_count=DbF('present_count') + 1)
+            
+            StudentAttendancePercentage.objects.filter(
+                student=student_obj,
+                subject=session.subject
+            ).update(attendancePercentage=(DbF('present_count') * 100.0) / total_sessions)
+            
+    if student_notification_list:
+        send_attendance_notifications(
+            student_notification_list,
+            session.subject.name,
+            session.class_datetime
+        )
+        
+    final_present_count = AttendanceRecord.objects.filter(class_session=session, status=True).count()
+    final_absent_count = AttendanceRecord.objects.filter(class_session=session, status=False).count()
+    
+    return {
+        "num_faces": total_faces,
+        "image_url": image_urls[0] if image_urls else None,
+        "image_urls": image_urls,
+        "class_session_id": class_session_id,
+        "division_id": division_id,
+        "present_count": final_present_count,
+        "absent_count": final_absent_count,
+        "newly_marked_present_count": len(present_student_prns),
+        "subject": session.subject.name
+    }
