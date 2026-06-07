@@ -1,7 +1,8 @@
 from django.urls import path, re_path
 from django.urls import include
 
-from Home.views import getDepartments,mark_attendance,teacher_profile,registerNewTeacher,validateStudent,validateTeacher,send_otp,verify_otp,set_password,get_subject_details,verify_email, verify_prn, get_student_attendance,attendance_status,teacher_subjects,teacher_class_sessions, get_present_absent_list,change_attendance,get_student_dashboard,update_notification_token,remove_notification_token, register_student, get_student_subject_attendance, update_face, get_session_photos, resubmit_attendance
+from Home.views import getDepartments,mark_attendance,teacher_profile,registerNewTeacher,validateStudent,validateTeacher,send_otp,verify_otp,set_password,get_subject_details,verify_email, verify_prn, get_student_attendance,attendance_status,teacher_subjects,teacher_class_sessions, get_present_absent_list,change_attendance,get_student_dashboard,update_notification_token,remove_notification_token, register_student, get_student_subject_attendance, update_face, get_session_photos, resubmit_attendance, get_daily_schedule
+from Home.views import list_holidays, declare_holiday, delete_holiday
 from django.conf import settings
 from django.conf.urls.static import static
 
@@ -59,6 +60,11 @@ urlpatterns = [
         resubmit_attendance,
         name="resubmit_attendance",
     ),
+    re_path(r"^getDailySchedule/?$", get_daily_schedule, name="get_daily_schedule"),
+    re_path(r"^schedule/daily/?$", get_daily_schedule, name="get_daily_schedule_alias"),
+    re_path(r"^holidays/?$", list_holidays, name="list_holidays"),
+    re_path(r"^holidays/create/?$", declare_holiday, name="declare_holiday"),
+    re_path(r"^holidays/(?P<pk>\d+)/?$", delete_holiday, name="delete_holiday"),
 ]
 
 if settings.DEBUG:

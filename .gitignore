@@ -66,6 +66,7 @@ DBMSUIS_V7_utf8.sql
 DBMSUIS_V7.sql
 RABBITMQ_MIGRATION.md
 setup_backend.bat
+add_teacher_data.py
 
 # Python virtual env
 .venv/

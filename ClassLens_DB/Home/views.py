@@ -3,7 +3,7 @@ import string
 from django.db.models import F
 from rest_framework.decorators import api_view, parser_classes,permission_classes
 from rest_framework.response import Response
-from .models import Department, Student, Teacher, SubjectFromDept, StudentAttendancePercentage,AttendanceRecord, StudentEnrollment,TeacherSubject, ClassSession, Subject,AttendancePhotos,AdminUser, Division
+from .models import Department, Student, Teacher, SubjectFromDept, StudentAttendancePercentage,AttendanceRecord, StudentEnrollment,TeacherSubject, ClassSession, Subject,AttendancePhotos,AdminUser, Division, Holiday
 from django.db.models import Count, Q
 from .serializers import DepartmentSerializer,SubjectSerializer
 from rest_framework.parsers import MultiPartParser
@@ -12,7 +12,7 @@ from django.contrib.auth.hashers import make_password, check_password
 from django.shortcuts import get_object_or_404
 import traceback
 import random
-from datetime import datetime
+from datetime import datetime, date
 from django.core.cache import cache
 from django.core.mail import send_mail
 from django.conf import settings
@@ -805,12 +805,10 @@ def teacher_subjects(request, *args, **kwargs):
                 if sfd:
                     semester = sfd.semester
             
-            # 2. If division was not set or semester/dept/year not found, fallback to subject's department or SubjectFromDept mapping
+            # 2. If division was not set or semester/dept/year not found, fallback to SubjectFromDept mapping
             if not dept_name or not year or not semester:
                 sfd_qs = SubjectFromDept.objects.filter(subject=row.subject_id)
-                if row.subject.department:
-                    sfd_qs = sfd_qs.filter(department=row.subject.department)
-                sfd = sfd_qs.first() or SubjectFromDept.objects.filter(subject=row.subject_id).first()
+                sfd = sfd_qs.first()
                 
                 if sfd:
                     if not dept_name:
@@ -822,7 +820,7 @@ def teacher_subjects(request, *args, **kwargs):
 
             # 3. Last fallbacks
             if not dept_name:
-                dept_name = row.subject.department.name if row.subject.department else (row.teacher_id.department.name if row.teacher_id.department else "General")
+                dept_name = row.teacher_id.department.name if row.teacher_id.department else "General"
             if not year:
                 year = 1
             if not semester:
@@ -1347,3 +1345,134 @@ def resubmit_attendance(request, *args, **kwargs):
     except Exception as e:
         traceback.print_exc()
         return Response({"error": f"Failed to start additional attendance processing: {str(e)}"}, status=500)
+
+
+@api_view(['GET'])
+def get_daily_schedule(request):
+    """
+    Fetches the schedule for today. Checks for holidays first.
+    """
+    target_date_str = request.GET.get('date')
+    if target_date_str:
+        try:
+            target_date = date.fromisoformat(target_date_str)
+        except ValueError:
+            return Response({"error": "Invalid date format. Use YYYY-MM-DD."}, status=status.HTTP_400_BAD_REQUEST)
+    else:
+        target_date = date.today()
+
+    # 1. The Holiday Gatekeeper
+    holiday = Holiday.objects.filter(date=target_date, is_working_day=False).first()
+    
+    if holiday:
+        return Response({
+            "is_holiday": True,
+            "holiday_name": holiday.name,
+            "message": f"Enjoy your holiday for {holiday.name}! No classes today.",
+            "sessions": []
+        }, status=status.HTTP_200_OK)
+
+    return Response({
+        "is_holiday": False,
+        "holiday_name": None,
+        "sessions": []
+    }, status=status.HTTP_200_OK)
+
+
+@api_view(['GET'])
+def list_holidays(request):
+    """
+    Lists all holidays, sorted by date.
+    """
+    try:
+        holidays = Holiday.objects.all().order_by('date')
+        from .serializers import HolidaySerializer
+        serializer = HolidaySerializer(holidays, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+    except Exception as e:
+        traceback.print_exc()
+        return Response(
+            {"error": f"Failed to retrieve holidays: {str(e)}"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+@api_view(['POST'])
+def declare_holiday(request):
+    """
+    Creates a new Holiday.
+    Expected request body:
+    {
+        "date": "YYYY-MM-DD",
+        "name": "Emergency Closure / Strike",
+        "is_working_day": false
+    }
+    """
+    data = request.data
+    date_str = data.get("date")
+    name = data.get("name")
+    is_working_day = data.get("is_working_day", False)
+
+    if not date_str or not name:
+        return Response(
+            {"error": "Both 'date' and 'name' are required fields."},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    try:
+        datetime.strptime(date_str, "%Y-%m-%d")
+    except ValueError:
+        return Response(
+            {"error": "Invalid date format. Use YYYY-MM-DD."},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    # Check if holiday for this date already exists
+    if Holiday.objects.filter(date=date_str).exists():
+        return Response(
+            {"error": "Holiday for this date already exists."},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    try:
+        holiday = Holiday.objects.create(
+            date=date_str,
+            name=name,
+            is_working_day=is_working_day
+        )
+        from .serializers import HolidaySerializer
+        return Response(
+            HolidaySerializer(holiday).data,
+            status=status.HTTP_201_CREATED
+        )
+    except Exception as e:
+        traceback.print_exc()
+        return Response(
+            {"error": f"Failed to declare holiday: {str(e)}"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+@api_view(['DELETE'])
+def delete_holiday(request, pk):
+    """
+    Deletes an existing holiday by id.
+    """
+    try:
+        holiday = Holiday.objects.filter(pk=pk).first()
+        if not holiday:
+            return Response(
+                {"error": "Holiday not found."},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        holiday.delete()
+        return Response(
+            {"message": "Holiday deleted successfully."},
+            status=status.HTTP_200_OK
+        )
+    except Exception as e:
+        traceback.print_exc()
+        return Response(
+            {"error": f"Failed to delete holiday: {str(e)}"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
