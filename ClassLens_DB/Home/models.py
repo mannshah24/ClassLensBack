@@ -43,7 +43,6 @@ class Student(models.Model):
 class Subject(models.Model):
     code = models.TextField(unique=True, null=False,default="")
     name = models.TextField(null=False)
-    department = models.ForeignKey(Department, on_delete=models.SET_NULL, null=True, blank=True)
     
     def __str__(self):
         return f"{self.name}"
@@ -156,3 +155,12 @@ class AdminUser(models.Model):
 
     def __str__(self):
         return self.username
+
+
+class Holiday(models.Model):
+    date = models.DateField(unique=True, help_text="The date of the holiday.")
+    name = models.CharField(max_length=255, help_text="e.g., Diwali, Independence Day, Heavy Rain")
+    is_working_day = models.BooleanField(default=False, help_text="Check if attendance is still required despite being a 'holiday'.")
+
+    def __str__(self):
+        return f"{self.date} - {self.name}"

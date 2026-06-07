@@ -33,6 +33,7 @@ SECRET_KEY = env("SECRET_KEY")
 DEBUG = True
 
 ALLOWED_HOSTS = [
+    '192.168.1.9',
     '172.16.141.76',
     '172.25.13.31',
     '172.16.141.247',
@@ -215,4 +216,4 @@ SIMPLE_JWT = {
     'BLACKLIST_AFTER_ROTATION': True,
     'ALGORITHM': 'HS256',
     'SIGNING_KEY': SECRET_KEY,
-}
+}

@@ -13,6 +13,7 @@ from .models import (
 	Subject,
 	Teacher,
 	TeacherSubject,
+	Holiday,
 )
 
 
@@ -29,7 +30,6 @@ class TeacherClassSessionsEndpointTests(TestCase):
 		self.subject = Subject.objects.create(
 			code="CS101",
 			name="Object Oriented Programming with Java-CSE",
-			department=self.department,
 		)
 		self.division = Division.objects.create(
 			department=self.department,
@@ -108,3 +108,106 @@ class TeacherClassSessionsEndpointTests(TestCase):
 
 		self.assertEqual(response.status_code, 200)
 		self.assertIn("class_sessions", response.data)
+
+
+class HolidayAPIEndpointTests(TestCase):
+	def setUp(self):
+		self.client = APIClient()
+
+	def test_get_daily_schedule_no_holiday(self):
+		# With no holiday on the date, should return is_holiday: False
+		response = self.client.get(
+			reverse("get_daily_schedule"),
+			{"date": "2026-06-07"},
+		)
+		self.assertEqual(response.status_code, 200)
+		self.assertFalse(response.data["is_holiday"])
+		self.assertEqual(len(response.data["sessions"]), 0)
+
+	def test_get_daily_schedule_alias_works(self):
+		# Verify that the schedule/daily route functions identically
+		response = self.client.get(
+			reverse("get_daily_schedule_alias"),
+			{"date": "2026-06-07"},
+		)
+		self.assertEqual(response.status_code, 200)
+		self.assertFalse(response.data["is_holiday"])
+		self.assertEqual(len(response.data["sessions"]), 0)
+
+	def test_get_daily_schedule_with_holiday(self):
+		# Create a non-working holiday
+		Holiday.objects.create(
+			date="2026-06-07",
+			name="Test Holiday",
+			is_working_day=False,
+		)
+		response = self.client.get(
+			reverse("get_daily_schedule"),
+			{"date": "2026-06-07"},
+		)
+		self.assertEqual(response.status_code, 200)
+		self.assertTrue(response.data["is_holiday"])
+		self.assertEqual(response.data["holiday_name"], "Test Holiday")
+		self.assertEqual(len(response.data["sessions"]), 0)
+
+	def test_get_daily_schedule_with_working_holiday(self):
+		# Create a working holiday
+		Holiday.objects.create(
+			date="2026-06-07",
+			name="Working Holiday",
+			is_working_day=True,
+		)
+		response = self.client.get(
+			reverse("get_daily_schedule"),
+			{"date": "2026-06-07"},
+		)
+		self.assertEqual(response.status_code, 200)
+		self.assertFalse(response.data["is_holiday"])
+
+	def test_list_holidays(self):
+		Holiday.objects.create(date="2026-06-07", name="Holiday A", is_working_day=False)
+		Holiday.objects.create(date="2026-06-08", name="Holiday B", is_working_day=True)
+		
+		response = self.client.get(reverse("list_holidays"))
+		self.assertEqual(response.status_code, 200)
+		self.assertEqual(len(response.data), 2)
+		self.assertEqual(response.data[0]["name"], "Holiday A")
+		self.assertEqual(response.data[1]["name"], "Holiday B")
+
+	def test_declare_holiday_success(self):
+		payload = {
+			"date": "2026-06-09",
+			"name": "New Emergency Holiday",
+			"is_working_day": False
+		}
+		response = self.client.post(reverse("declare_holiday"), payload, format="json")
+		self.assertEqual(response.status_code, 201)
+		self.assertEqual(response.data["name"], "New Emergency Holiday")
+		self.assertTrue(Holiday.objects.filter(date="2026-06-09").exists())
+
+	def test_declare_holiday_duplicate(self):
+		Holiday.objects.create(date="2026-06-09", name="Existing Holiday")
+		payload = {
+			"date": "2026-06-09",
+			"name": "Duplicate Holiday",
+			"is_working_day": False
+		}
+		response = self.client.post(reverse("declare_holiday"), payload, format="json")
+		self.assertEqual(response.status_code, 400)
+		self.assertIn("error", response.data)
+
+	def test_declare_holiday_invalid_date(self):
+		payload = {
+			"date": "invalid-date",
+			"name": "Invalid Date Holiday",
+			"is_working_day": False
+		}
+		response = self.client.post(reverse("declare_holiday"), payload, format="json")
+		self.assertEqual(response.status_code, 400)
+
+	def test_delete_holiday(self):
+		h = Holiday.objects.create(date="2026-06-10", name="Temp Holiday")
+		response = self.client.delete(reverse("delete_holiday", kwargs={"pk": h.pk}))
+		self.assertEqual(response.status_code, 200)
+		self.assertFalse(Holiday.objects.filter(pk=h.pk).exists())
+
