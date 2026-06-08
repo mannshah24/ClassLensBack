@@ -164,3 +164,35 @@ class Holiday(models.Model):
 
     def __str__(self):
         return f"{self.date} - {self.name}"
+
+
+class TimetableTemplate(models.Model):
+    subject = models.ForeignKey(Subject, on_delete=models.CASCADE)
+    day_of_week = models.IntegerField(help_text="0=Monday, 1=Tuesday, 2=Wednesday, 3=Thursday, 4=Friday, 5=Saturday, 6=Sunday")
+    department = models.ForeignKey(Department, on_delete=models.CASCADE, null=True, blank=True)
+    program = models.CharField(max_length=100, null=True, blank=True)
+    division = models.ForeignKey(Division, on_delete=models.CASCADE)
+    year = models.IntegerField(null=True, blank=True)
+    semester = models.IntegerField(null=True, blank=True)
+    default_teacher = models.ForeignKey(Teacher, on_delete=models.CASCADE)
+
+    def __str__(self):
+        return f"{self.subject.name} - Day {self.day_of_week} ({self.division.name})"
+
+
+class DailySession(models.Model):
+    subject = models.ForeignKey(Subject, on_delete=models.CASCADE)
+    date = models.DateField()
+    department = models.ForeignKey(Department, on_delete=models.CASCADE, null=True, blank=True)
+    program = models.CharField(max_length=100, null=True, blank=True)
+    division = models.ForeignKey(Division, on_delete=models.CASCADE)
+    year = models.IntegerField(null=True, blank=True)
+    semester = models.IntegerField(null=True, blank=True)
+    teacher = models.ForeignKey(Teacher, on_delete=models.CASCADE)
+    start_time = models.TimeField(null=True, blank=True)
+    end_time = models.TimeField(null=True, blank=True)
+    is_cancelled = models.BooleanField(default=False)
+    proxy_teacher = models.ForeignKey(Teacher, on_delete=models.SET_NULL, null=True, blank=True, related_name='proxy_daily_sessions')
+
+    def __str__(self):
+        return f"{self.date} - {self.subject.name} ({self.division.name})"

@@ -19,6 +19,9 @@ from .views import (
     sync_msuis_payload,
     sync_staging_to_core,
     DivisionViewSet,
+    TeacherSubjectViewSet,
+    TimetableTemplateViewSet,
+    DailySessionViewSet,
 )
 
 router = DefaultRouter()
@@ -36,6 +39,11 @@ router.register(r"admin-users", AdminUserViewSet, basename="admin-user")
 router.register(r"api-students", APIStudentViewSet, basename="api-student")
 router.register(r"api-papers", APIPaperViewSet, basename="api-paper")
 router.register(r"divisions", DivisionViewSet, basename="division")
+router.register(r"teacher-subjects", TeacherSubjectViewSet, basename="teacher-subject")
+router.register(r"timetable-templates", TimetableTemplateViewSet, basename="timetable-template")
+router.register(r"daily-sessions", DailySessionViewSet, basename="daily-session")
+
+
 
 urlpatterns = [
     # Authentication

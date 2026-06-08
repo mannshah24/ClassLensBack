@@ -10,10 +10,12 @@ try:
 except Exception:
     pd = None
 import io
+import traceback
 from .pagination import StudentPagination
 from Home.models import (
     Department, Teacher, Student, Subject, SubjectFromDept,
-    StudentEnrollment, TeacherSubject, AdminUser, StudentAttendancePercentage, Division
+    StudentEnrollment, TeacherSubject, AdminUser, StudentAttendancePercentage, Division,
+    TimetableTemplate, DailySession
 )
 from .models import (
     APIStudent,
@@ -27,6 +29,8 @@ from .serializers import (
     APIStudentSerializer, APIPaperSerializer,
     DivisionSerializer,
 )
+from Home.serializers import TimetableTemplateSerializer, DailySessionSerializer
+
 from django.db import transaction
 from django.db.models import Max
 
@@ -447,6 +451,27 @@ class SubjectViewSet(viewsets.ModelViewSet):
 class SubjectFromDeptViewSet(viewsets.ModelViewSet):
     queryset = SubjectFromDept.objects.all().select_related('department').prefetch_related('subject')
     serializer_class = SubjectFromDeptSerializer
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        dept_id = self.request.query_params.get('department')
+        year = self.request.query_params.get('year')
+        semester = self.request.query_params.get('semester')
+        if dept_id:
+            queryset = queryset.filter(department_id=dept_id)
+        if year:
+            queryset = queryset.filter(year=year)
+        if semester:
+            try:
+                y = int(year) if year else 1
+                s = int(semester)
+                if s > 2:
+                    s = s - (y - 1) * 2
+                queryset = queryset.filter(semester=s)
+            except Exception:
+                queryset = queryset.filter(semester=semester)
+        return queryset
+
     
     @action(detail=False, methods=['get'])
     def download_template(self, request):
@@ -655,6 +680,17 @@ class DivisionViewSet(viewsets.ModelViewSet):
     queryset = Division.objects.all().select_related('department')
     serializer_class = DivisionSerializer
     permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        dept_id = self.request.query_params.get('department')
+        year = self.request.query_params.get('year')
+        if dept_id:
+            queryset = queryset.filter(department_id=dept_id)
+        if year:
+            queryset = queryset.filter(year=year)
+        return queryset
+
 
 
 def _full_name(student_record):
@@ -918,4 +954,180 @@ def sync_staging_to_core(request):
         },
         status=status.HTTP_200_OK,
     )
+
+
+class TimetableTemplateViewSet(viewsets.ModelViewSet):
+    queryset = TimetableTemplate.objects.all().select_related('subject', 'division', 'default_teacher')
+    serializer_class = TimetableTemplateSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        division_id = self.request.query_params.get('division')
+        year = self.request.query_params.get('year')
+        semester = self.request.query_params.get('semester')
+        department_id = self.request.query_params.get('department')
+        if division_id:
+            queryset = queryset.filter(division_id=division_id)
+        if year:
+            queryset = queryset.filter(year=year)
+        if semester:
+            queryset = queryset.filter(semester=semester)
+        if department_id:
+            queryset = queryset.filter(department_id=department_id)
+        return queryset
+
+    @action(detail=False, methods=['post'], url_path='bulk-save')
+    def bulk_save(self, request):
+        department_id = request.data.get('department')
+        program = request.data.get('program')
+        year = request.data.get('year')
+        division_id = request.data.get('division')
+        semester = request.data.get('semester')
+        slots = request.data.get('slots', [])
+
+        if not department_id or not division_id or not year or not semester:
+            return Response({"error": "Missing specification details (department, division, year, semester)"}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            with transaction.atomic():
+                # Delete existing templates matching this spec
+                TimetableTemplate.objects.filter(
+                    department_id=department_id,
+                    program=program,
+                    year=year,
+                    division_id=division_id,
+                    semester=semester
+                ).delete()
+
+                # Bulk create new ones
+                new_templates = []
+                for slot in slots:
+                    new_templates.append(
+                        TimetableTemplate(
+                            department_id=department_id,
+                            program=program,
+                            year=year,
+                            division_id=division_id,
+                            semester=semester,
+                            day_of_week=int(slot['day_of_week']),
+                            subject_id=int(slot['subject']),
+                            default_teacher_id=int(slot['default_teacher'])
+                        )
+                    )
+                if new_templates:
+                    TimetableTemplate.objects.bulk_create(new_templates)
+
+            return Response({"message": "Timetable saved successfully."}, status=status.HTTP_200_OK)
+        except Exception as e:
+            traceback.print_exc()
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+
+class TeacherSubjectViewSet(viewsets.ModelViewSet):
+    queryset = TeacherSubject.objects.all().select_related('teacher_id', 'subject', 'division')
+    serializer_class = TeacherSubjectSerializer
+    permission_classes = [IsAuthenticated]
+
+    @action(detail=False, methods=['post'], url_path='bulk-assign')
+    def bulk_assign(self, request):
+        teacher_id = request.data.get('teacher_id')
+        subject_ids = request.data.get('subject_ids', [])
+        division_id = request.data.get('division_id')
+
+        if not teacher_id:
+            return Response({"error": "teacher_id is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            teacher = Teacher.objects.get(id=teacher_id)
+            division = Division.objects.filter(id=division_id).first() if division_id else None
+
+            with transaction.atomic():
+                # Delete existing mappings for this teacher & division
+                TeacherSubject.objects.filter(teacher_id=teacher, division=division).delete()
+
+                # Bulk create
+                new_mappings = []
+                for sub_id in subject_ids:
+                    subject = Subject.objects.get(id=sub_id)
+                    ts = TeacherSubject(
+                        teacher_id=teacher,
+                        subject=subject,
+                        division=division
+                    )
+                    new_mappings.append(ts)
+                TeacherSubject.objects.bulk_create(new_mappings)
+
+            return Response({
+                "message": f"Successfully assigned {len(new_mappings)} subjects to teacher {teacher.name}."
+            }, status=status.HTTP_200_OK)
+
+        except Teacher.DoesNotExist:
+            return Response({"error": "Teacher not found."}, status=status.HTTP_404_NOT_FOUND)
+        except Exception as e:
+            traceback.print_exc()
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    @action(detail=False, methods=['get'], url_path='mapping-details')
+    def mapping_details(self, request):
+        teacher_id = request.query_params.get('teacher_id')
+        if not teacher_id:
+            return Response({"error": "teacher_id is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            teacher = Teacher.objects.get(id=teacher_id)
+            # Find divisions in this teacher's department
+            divisions = Division.objects.filter(department=teacher.department)
+            # Find subjects mapped to this department (via SubjectFromDept)
+            sfd_subjects = Subject.objects.filter(subjectfromdept__department=teacher.department).distinct()
+            
+            # If no subjects are mapped to their department, fallback to all subjects
+            if not sfd_subjects.exists():
+                sfd_subjects = Subject.objects.all()
+
+            # Mapped subject IDs for this teacher
+            mapped_subject_ids = list(
+                TeacherSubject.objects.filter(teacher_id=teacher)
+                .values_list('subject_id', flat=True)
+            )
+
+            # Serialize subjects and divisions
+            from .serializers import DivisionSerializer, SubjectSerializer
+            div_serialized = DivisionSerializer(divisions, many=True).data
+            sub_serialized = SubjectSerializer(sfd_subjects, many=True).data
+
+            return Response({
+                "divisions": div_serialized,
+                "subjects": sub_serialized,
+                "mapped_subjects": mapped_subject_ids
+            }, status=status.HTTP_200_OK)
+
+        except Teacher.DoesNotExist:
+            return Response({"error": "Teacher not found."}, status=status.HTTP_404_NOT_FOUND)
+        except Exception as e:
+            traceback.print_exc()
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class DailySessionViewSet(viewsets.ModelViewSet):
+    queryset = DailySession.objects.all().select_related('subject', 'division', 'teacher', 'proxy_teacher')
+    serializer_class = DailySessionSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        date_str = self.request.query_params.get('date')
+        teacher_id = self.request.query_params.get('teacher_id')
+        division_id = self.request.query_params.get('division')
+        
+        if date_str:
+            queryset = queryset.filter(date=date_str)
+        if teacher_id:
+            queryset = queryset.filter(teacher_id=teacher_id)
+        if division_id:
+            queryset = queryset.filter(division_id=division_id)
+        return queryset
+
+
  

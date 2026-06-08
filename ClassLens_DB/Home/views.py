@@ -3,11 +3,12 @@ import string
 from django.db.models import F
 from rest_framework.decorators import api_view, parser_classes,permission_classes
 from rest_framework.response import Response
-from .models import Department, Student, Teacher, SubjectFromDept, StudentAttendancePercentage,AttendanceRecord, StudentEnrollment,TeacherSubject, ClassSession, Subject,AttendancePhotos,AdminUser, Division, Holiday
+from .models import Department, Student, Teacher, SubjectFromDept, StudentAttendancePercentage,AttendanceRecord, StudentEnrollment,TeacherSubject, ClassSession, Subject,AttendancePhotos,AdminUser, Division, Holiday, TimetableTemplate, DailySession
 from django.db.models import Count, Q
-from .serializers import DepartmentSerializer,SubjectSerializer
+from .serializers import DepartmentSerializer,SubjectSerializer, DailySessionSerializer
 from rest_framework.parsers import MultiPartParser
 from rest_framework_simplejwt.tokens import RefreshToken, AccessToken
+
 from django.contrib.auth.hashers import make_password, check_password
 from django.shortcuts import get_object_or_404
 import traceback
@@ -186,9 +187,21 @@ def get_subject_details(request, *args, **kwargs):
         semester = request.data.get("semester")
         try:
             department = get_object_or_404(Department, name=department_name)
+            
+            # Map absolute semester to relative semester if needed
+            rel_semester = semester
+            try:
+                y_val = int(year)
+                s_val = int(semester)
+                if s_val > 2:
+                    rel_semester = s_val - (y_val - 1) * 2
+            except Exception:
+                pass
+
             subject_from_dept = get_object_or_404(
-                SubjectFromDept, department=department, year=year, semester=semester
+                SubjectFromDept, department=department, year=year, semester=rel_semester
             )
+
             subjects = subject_from_dept.subject.all()
             subjects = SubjectSerializer(subjects, many=True).data
             divisions = Division.objects.filter(
@@ -715,15 +728,26 @@ def mark_attendance(request, *args, **kwargs):
         if division_id:
             teacher_subject_qs = teacher_subject_qs.filter(division_id=division_id)
 
-        if not teacher_subject_qs.exists():
-            return Response(
-                {"error": "Teacher is not mapped to this subject/division"},
-                status=400,
-            )
-
         resolved_division_id = int(division_id) if division_id else None
-        if resolved_division_id is None and teacher_subject_qs.count() == 1:
+        if resolved_division_id is None and teacher_subject_qs.exists():
             resolved_division_id = teacher_subject_qs.first().division_id
+
+        # Update DailySession today if it exists for this subject/division to track proxy teacher
+        from datetime import date
+        today = date.today()
+        daily_session_qs = DailySession.objects.filter(
+            subject_id=subject_id,
+            date=today
+        )
+        if resolved_division_id:
+            daily_session_qs = daily_session_qs.filter(division_id=resolved_division_id)
+        
+        daily_session = daily_session_qs.first()
+        if daily_session:
+            if daily_session.teacher_id != int(teacher_id):
+                daily_session.proxy_teacher_id = int(teacher_id)
+                daily_session.save(update_fields=['proxy_teacher'])
+
 
         class_session = ClassSession.objects.create(
             department = get_object_or_404(Department, name=departmentName),
@@ -780,12 +804,15 @@ def teacher_subjects(request, *args, **kwargs):
     if not teacher_id:
         return Response({"error": "Teacher ID is required"}, status=400)
     try:
+        teacher = Teacher.objects.select_related('department').get(id=teacher_id)
         subjects = TeacherSubject.objects.filter(teacher_id=teacher_id).select_related(
             "subject",
             "division",
         )
 
         clean_subjects = []
+        existing_keys = set()
+
         for row in subjects:
             dept_name = None
             year = None
@@ -841,7 +868,9 @@ def teacher_subjects(request, *args, **kwargs):
                 "year": year,
                 "semester": semester,
                 "strength": strength,
+                "is_mapped": True,
             })
+            existing_keys.add((row.subject_id, row.division_id))
 
         return Response({"subjects": clean_subjects}, status=200)
     except Exception as e:
@@ -850,6 +879,7 @@ def teacher_subjects(request, *args, **kwargs):
             {"detail": "Something went wrong"},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
+
 
 
 @api_view(["GET", "POST"])
@@ -1073,7 +1103,31 @@ def _resolve_student_semester(student):
 
     first_mapping = subject_mappings.first()
     return first_mapping.semester if first_mapping else None
-    
+
+
+def _resolve_student_program(student):
+    from Home.models import TimetableTemplate, DailySession
+    p = TimetableTemplate.objects.filter(division=student.division).exclude(program__isnull=True).exclude(program='').values_list('program', flat=True).first()
+    if p:
+        return p
+    p = DailySession.objects.filter(division=student.division).exclude(program__isnull=True).exclude(program='').values_list('program', flat=True).first()
+    if p:
+        return p
+    if student.department:
+        dept_name = student.department.name.lower()
+        if "computer" in dept_name or "cse" in dept_name:
+            return "B.E. CSE"
+        elif "electronics" in dept_name or "extc" in dept_name:
+            return "B.E. EXTC"
+        elif "mechanical" in dept_name:
+            return "B.E. Mech"
+        elif "civil" in dept_name:
+            return "B.E. Civil"
+        elif "information technology" in dept_name or "it" in dept_name:
+            return "B.E. IT"
+    return "B.E. CSE"
+
+
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def admin_login(request):
@@ -1372,11 +1426,38 @@ def get_daily_schedule(request):
             "sessions": []
         }, status=status.HTTP_200_OK)
 
+    # Trigger generation dynamically if no sessions exist
+    sessions = DailySession.objects.filter(date=target_date)
+    if not sessions.exists():
+        from .tasks import generate_daily_sessions
+        generate_daily_sessions(for_date_str=target_date.isoformat())
+        sessions = DailySession.objects.filter(date=target_date)
+
+    # Filter by student_id or teacher_id
+    student_id = request.GET.get('student_id')
+    teacher_id = request.GET.get('teacher_id')
+
+    if student_id:
+        try:
+            student = Student.objects.get(id=student_id)
+            if student.division:
+                sessions = sessions.filter(division=student.division)
+            else:
+                sessions = sessions.none()
+        except Student.DoesNotExist:
+            return Response({"error": "Student not found."}, status=status.HTTP_404_NOT_FOUND)
+
+    if teacher_id:
+        sessions = sessions.filter(Q(teacher_id=teacher_id) | Q(proxy_teacher_id=teacher_id))
+
+    serializer = DailySessionSerializer(sessions, many=True)
+
     return Response({
         "is_holiday": False,
         "holiday_name": None,
-        "sessions": []
+        "sessions": serializer.data
     }, status=status.HTTP_200_OK)
+
 
 
 @api_view(['GET'])
@@ -1475,4 +1556,316 @@ def delete_holiday(request, pk):
         return Response(
             {"error": f"Failed to delete holiday: {str(e)}"},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
-        )
+        )
+
+
+@api_view(['GET'])
+def get_weekly_timetable(request):
+    """
+    Fetches the full weekly timetable for a student's division.
+    """
+    student_id = request.GET.get('student_id')
+    if not student_id:
+        return Response({"error": "student_id is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        student = Student.objects.get(id=student_id)
+        if not student.division:
+            return Response({
+                "division_name": None,
+                "timetable": {}
+            }, status=status.HTTP_200_OK)
+
+        templates = TimetableTemplate.objects.filter(division=student.division).order_by('day_of_week')
+        from .serializers import TimetableTemplateSerializer
+        serializer = TimetableTemplateSerializer(templates, many=True)
+        
+        # Group by day of week
+        days_names = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+        grouped = {day: [] for day in days_names}
+        for item in serializer.data:
+            day_idx = item.get('day_of_week')
+            if day_idx is not None and 0 <= day_idx < len(days_names):
+                day_name = days_names[day_idx]
+                grouped[day_name].append(item)
+
+        return Response({
+            "division_name": student.division.name,
+            "timetable": grouped
+        }, status=status.HTTP_200_OK)
+
+    except Student.DoesNotExist:
+        return Response({"error": "Student not found."}, status=status.HTTP_404_NOT_FOUND)
+    except Exception as e:
+        traceback.print_exc()
+        return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['POST'])
+def student_bulk_upload(request):
+    """
+    Bulk upload students from CSV/Excel linked to specific department, program, and division.
+    """
+    import pandas as pd
+    from django.db import transaction
+
+    department_id = request.data.get('department')
+    division_id = request.data.get('division')
+    program = request.data.get('program')
+    file = request.FILES.get('file')
+
+    if not file:
+        return Response({'error': 'No file provided'}, status=status.HTTP_400_BAD_REQUEST)
+    if not department_id:
+        return Response({'error': 'Department is required'}, status=status.HTTP_400_BAD_REQUEST)
+    if not division_id:
+        return Response({'error': 'Division is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        department = Department.objects.get(id=department_id)
+        division = Division.objects.get(id=division_id)
+
+        if file.name.endswith('.csv'):
+            df = pd.read_csv(file)
+        elif file.name.endswith(('.xlsx', '.xls')):
+            df = pd.read_excel(file)
+        else:
+            return Response({'error': 'Invalid file format. Use CSV or Excel.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        df.columns = [str(column).strip() for column in df.columns]
+
+        required_columns = {'prn', 'name', 'email'}
+        missing_columns = required_columns.difference(df.columns)
+        if missing_columns:
+            return Response(
+                {'error': f"Missing required columns in file: {', '.join(sorted(missing_columns))}"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        created_count = 0
+        errors = []
+        default_year = division.year if hasattr(division, 'year') else 1
+
+        with transaction.atomic():
+            for index, row in df.iterrows():
+                try:
+                    prn = int(row['prn'])
+                    name = str(row['name']).strip()
+                    email = str(row['email']).strip()
+                    year = int(row.get('year', default_year))
+
+                    student, created = Student.objects.update_or_create(
+                        prn=prn,
+                        defaults={
+                            'name': name,
+                            'email': email,
+                            'department': department,
+                            'division': division,
+                            'year': year,
+                        }
+                    )
+                    
+                    if created:
+                        created_count += 1
+                except Exception as e:
+                    errors.append(f"Row {index + 1}: {str(e)}")
+
+        return Response({
+            'message': f'Successfully processed {created_count} students.',
+            'created_count': created_count,
+            'errors': errors
+        }, status=status.HTTP_201_CREATED)
+
+    except Department.DoesNotExist:
+        return Response({'error': 'Department not found.'}, status=status.HTTP_404_NOT_FOUND)
+    except Division.DoesNotExist:
+        return Response({'error': 'Division not found.'}, status=status.HTTP_404_NOT_FOUND)
+    except Exception as e:
+        traceback.print_exc()
+        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['GET'])
+def attendance_analytics(request):
+    """
+    Fetch attendance stats/logs.
+    Accepts: class (subject_id), batch (division_id/year), student_id, department, program, search_student, threshold_percentage.
+    """
+    subject_id = request.GET.get('class')
+    division_id = request.GET.get('batch')
+    student_id = request.GET.get('student_id')
+    department_id = request.GET.get('department')
+    program = request.GET.get('program')
+    student_search = request.GET.get('search_student')
+    threshold_str = request.GET.get('threshold_percentage')
+
+    try:
+        queryset = StudentAttendancePercentage.objects.all().select_related('student__division', 'subject')
+
+        if subject_id:
+            queryset = queryset.filter(subject_id=subject_id)
+        if division_id:
+            queryset = queryset.filter(student__division_id=division_id)
+        if student_id:
+            queryset = queryset.filter(student_id=student_id)
+        if department_id:
+            queryset = queryset.filter(student__department_id=department_id)
+        if program:
+            from Home.models import TimetableTemplate, DailySession
+            div_ids = set(TimetableTemplate.objects.filter(program__icontains=program).values_list('division_id', flat=True))
+            div_ids.update(DailySession.objects.filter(program__icontains=program).values_list('division_id', flat=True))
+            queryset = queryset.filter(student__division_id__in=div_ids)
+
+        student_profile = None
+
+        if student_search:
+            student = None
+            if student_search.strip().isdigit():
+                student = Student.objects.filter(prn=int(student_search.strip())).first()
+            if not student:
+                student = Student.objects.filter(name__icontains=student_search.strip()).first()
+            
+            if student:
+                semester = _resolve_student_semester(student)
+                
+                # Fetch all enrolled subjects for this student
+                enrolled_subjects = Subject.objects.filter(
+                    id__in=StudentEnrollment.objects.filter(student_prn=student.prn).values_list('subject_id', flat=True)
+                )
+                
+                # Map subject ID to absolute semester
+                subject_to_sem = {}
+                from Home.models import SubjectFromDept
+                for mapping in SubjectFromDept.objects.filter(department=student.department).prefetch_related("subject"):
+                    abs_sem = (mapping.year - 1) * 2 + mapping.semester
+                    for sub in mapping.subject.all():
+                        subject_to_sem[sub.id] = abs_sem
+
+                current_abs_sem = (student.year - 1) * 2 + semester
+                
+                subjects_data = []
+                total_classes_sum = 0
+                attended_sum = 0
+                semesters_map = {}
+                
+                for subject in enrolled_subjects:
+                    sap = StudentAttendancePercentage.objects.filter(student=student, subject=subject).first()
+                    present_count = sap.present_count if sap else 0
+                    attendance_percentage = sap.attendancePercentage if sap else 0.0
+                    
+                    total_sessions = AttendanceRecord.objects.filter(student=student, class_session__subject=subject).count()
+                    
+                    if total_sessions > 0 and not sap:
+                        attended = AttendanceRecord.objects.filter(student=student, class_session__subject=subject, status=True).count()
+                        present_count = attended
+                        attendance_percentage = (attended / total_sessions) * 100.0
+                    
+                    sub_detail = {
+                        "id": subject.id,
+                        "name": subject.name,
+                        "code": subject.code,
+                        "total": total_sessions,
+                        "attended": present_count,
+                        "percentage": round(attendance_percentage, 2)
+                    }
+                    
+                    subjects_data.append(sub_detail)
+                    total_classes_sum += total_sessions
+                    attended_sum += present_count
+                    
+                    abs_sem = subject_to_sem.get(subject.id, current_abs_sem)
+                    if abs_sem not in semesters_map:
+                        semesters_map[abs_sem] = {
+                            "semester_number": abs_sem,
+                            "subjects": [],
+                            "total_classes": 0,
+                            "total_attended": 0
+                        }
+                    semesters_map[abs_sem]["subjects"].append(sub_detail)
+                    semesters_map[abs_sem]["total_classes"] += total_sessions
+                    semesters_map[abs_sem]["total_attended"] += present_count
+                
+                semesters_data = []
+                for abs_sem, sem_info in sorted(semesters_map.items()):
+                    sem_overall = 0.0
+                    if sem_info["total_classes"] > 0:
+                        sem_overall = round((sem_info["total_attended"] / sem_info["total_classes"]) * 100.0, 2)
+                    
+                    semesters_data.append({
+                        "semester_number": abs_sem,
+                        "overall_attendance": sem_overall,
+                        "subjects": sem_info["subjects"]
+                    })
+                
+                overall_percentage = 0.0
+                if total_classes_sum > 0:
+                    overall_percentage = round((attended_sum / total_classes_sum) * 100.0, 2)
+                
+                student_profile = {
+                    "id": student.id,
+                    "name": student.name,
+                    "prn": student.prn,
+                    "email": student.email,
+                    "year": student.year,
+                    "semester": semester,
+                    "division_name": student.division.name if student.division else "N/A",
+                    "department_name": student.department.name if student.department else "N/A",
+                    "program": _resolve_student_program(student),
+                    "overall_attendance": overall_percentage,
+                    "subjects": subjects_data,
+                    "semesters": semesters_data
+                }
+                
+                queryset = queryset.filter(student=student)
+
+        stats = []
+        for sap in queryset:
+            student = sap.student
+            subject = sap.subject
+            
+            # Count total sessions for this student and subject
+            total_sessions = AttendanceRecord.objects.filter(student=student, class_session__subject=subject).count()
+            percentage = sap.attendancePercentage
+
+            stats.append({
+                "student_id": student.id,
+                "student_name": student.name,
+                "prn": student.prn,
+                "email": student.email,
+                "division_name": student.division.name if student.division else "N/A",
+                "division_id": student.division_id,
+                "subject_id": subject.id,
+                "subject_name": subject.name,
+                "subject_code": subject.code,
+                "present_count": sap.present_count,
+                "total_sessions": total_sessions,
+                "attendance_percentage": round(percentage, 2)
+            })
+
+        # Deduplicate stats list by (student_id, subject_id)
+        seen = set()
+        deduped_stats = []
+        for s in stats:
+            key = (s['student_id'], s['subject_id'])
+            if key not in seen:
+                seen.add(key)
+                deduped_stats.append(s)
+        stats = deduped_stats
+
+        if threshold_str:
+            try:
+                threshold = float(threshold_str)
+                stats = [s for s in stats if s['attendance_percentage'] < threshold]
+            except ValueError:
+                pass
+
+        return Response({
+            "analytics": stats,
+            "student_profile": student_profile
+        }, status=status.HTTP_200_OK)
+
+    except Exception as e:
+        traceback.print_exc()
+        return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
