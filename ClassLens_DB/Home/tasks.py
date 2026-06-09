@@ -63,6 +63,7 @@ if torch is not None:
     torch.load = patched_torch_load
 
 from .models import Student, AttendanceRecord, ClassSession, StudentEnrollment, StudentAttendancePercentage
+from .utils import sync_student_subject_attendance
 from django.utils import timezone
 
 # Defer GFPGAN restorer initialization until a task runs to avoid import-time file access
@@ -298,17 +299,13 @@ def evaluate_attendance(total_sessions, class_session_id: int, scheme, host, div
             
             student_notification_list.append((student_obj, is_present))
 
-            StudentAttendancePercentage.objects.filter(
-                student=student_obj,
-                subject=session.subject
-            ).update(present_count=DbF('present_count') + (1 if is_present else 0))
-
-            StudentAttendancePercentage.objects.filter(
-                student=student_obj,
-                subject=session.subject
-            ).update(attendancePercentage=(DbF('present_count')*100.0)/total_sessions)
-
     AttendanceRecord.objects.bulk_create(records_to_create)
+
+    # Sync cache percentages for all enrolled students
+    for prn in enrolled_prns:
+        student_obj = student_obj_map.get(prn)
+        if student_obj:
+            sync_student_subject_attendance(student_obj, session.subject)
     
     send_attendance_notifications(
         student_notification_list,
@@ -461,15 +458,7 @@ def evaluate_additional_attendance(class_session_id: int, new_photo_ids: list, s
             
             student_notification_list.append((student_obj, True))
             
-            StudentAttendancePercentage.objects.filter(
-                student=student_obj,
-                subject=session.subject
-            ).update(present_count=DbF('present_count') + 1)
-            
-            StudentAttendancePercentage.objects.filter(
-                student=student_obj,
-                subject=session.subject
-            ).update(attendancePercentage=(DbF('present_count') * 100.0) / total_sessions)
+            sync_student_subject_attendance(student_obj, session.subject)
             
     if student_notification_list:
         send_attendance_notifications(
