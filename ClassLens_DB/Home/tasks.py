@@ -484,7 +484,7 @@ def evaluate_additional_attendance(class_session_id: int, new_photo_ids: list, s
 
 
 @shared_task
-def generate_daily_sessions(for_date_str=None):
+def generate_daily_sessions(for_date_str=None, division_id=None):
     from datetime import date
     from .models import TimetableTemplate, DailySession, Holiday
 
@@ -501,6 +501,12 @@ def generate_daily_sessions(for_date_str=None):
     weekday = target_date.weekday()  # 0 = Monday, 6 = Sunday
 
     templates = TimetableTemplate.objects.filter(day_of_week=weekday)
+    if division_id is not None:
+        if isinstance(division_id, (list, tuple, set)):
+            templates = templates.filter(division_id__in=division_id)
+        else:
+            templates = templates.filter(division_id=division_id)
+
     created = 0
     for template in templates:
         exists = DailySession.objects.filter(
@@ -517,7 +523,8 @@ def generate_daily_sessions(for_date_str=None):
                 division=template.division,
                 year=template.year,
                 semester=template.semester,
-                teacher=template.default_teacher
+                teacher=template.default_teacher,
+                ui_order=template.ui_order
             )
             created += 1
     return f"Created {created} daily sessions for {target_date}"

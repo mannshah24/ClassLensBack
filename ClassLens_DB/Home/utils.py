@@ -5,9 +5,12 @@ def sync_student_subject_attendance(student, subject):
     """
     Recalculate and update the StudentAttendancePercentage cache record for a specific student and subject.
     """
-    from Home.models import AttendanceRecord, StudentAttendancePercentage, ClassSession
+    from Home.models import AttendanceRecord, StudentAttendancePercentage
     
-    total_sessions = ClassSession.objects.filter(subject=subject).count()
+    total_sessions = AttendanceRecord.objects.filter(
+        student=student,
+        class_session__subject=subject
+    ).count()
     present_count = AttendanceRecord.objects.filter(
         student=student, 
         class_session__subject=subject, 
@@ -33,7 +36,7 @@ def sync_all_attendance_percentages():
     Perform a highly efficient bulk synchronization of all enrollments
     with the StudentAttendancePercentage cache table.
     """
-    from Home.models import Student, StudentEnrollment, StudentAttendancePercentage, AttendanceRecord, ClassSession
+    from Home.models import Student, StudentEnrollment, StudentAttendancePercentage, AttendanceRecord
     
     # 1. Map student PRN to Student objects
     students = {s.prn: s for s in Student.objects.all()}
@@ -47,13 +50,7 @@ def sync_all_attendance_percentages():
         for sap in StudentAttendancePercentage.objects.all()
     }
     
-    # 4. Count total class sessions for all subjects
-    subject_sessions = {
-        item['subject']: item['count']
-        for item in ClassSession.objects.values('subject').annotate(count=Count('id'))
-    }
-    
-    # 5. Aggregate attendance records (total recorded sessions, present count)
+    # 4. Aggregate attendance records (total recorded sessions, present count)
     attendance_summary = {}
     records = AttendanceRecord.objects.values('student_id', 'class_session__subject_id').annotate(
         total=Count('id'),
@@ -74,10 +71,7 @@ def sync_all_attendance_percentages():
         subject = enrollment.subject
         key = (student.id, subject.id)
         
-        total_sessions = subject_sessions.get(subject.id, 0)
-        
-        # Get actual present count recorded
-        _, present_count = attendance_summary.get(key, (0, 0))
+        total_sessions, present_count = attendance_summary.get(key, (0, 0))
         
         attendance_percentage = 0.0
         if total_sessions > 0:

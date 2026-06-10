@@ -11,7 +11,7 @@ from Home.views import (
     get_student_subject_attendance, update_face, get_session_photos,
     resubmit_attendance, get_daily_schedule, get_weekly_timetable,
     student_bulk_upload, attendance_analytics, list_holidays,
-    declare_holiday, delete_holiday
+    declare_holiday, delete_holiday, update_session_order
 )
 
 from django.conf import settings
@@ -73,6 +73,7 @@ urlpatterns = [
     ),
     re_path(r"^getDailySchedule/?$", get_daily_schedule, name="get_daily_schedule"),
     re_path(r"^schedule/daily/?$", get_daily_schedule, name="get_daily_schedule_alias"),
+    re_path(r"^schedule/daily/reorder/?$", update_session_order, name="update_session_order"),
     re_path(r"^holidays/?$", list_holidays, name="list_holidays"),
     re_path(r"^holidays/create/?$", declare_holiday, name="declare_holiday"),
     re_path(r"^holidays/(?P<pk>\d+)/?$", delete_holiday, name="delete_holiday"),
