@@ -1609,7 +1609,7 @@ def get_weekly_timetable(request):
                 "timetable": {}
             }, status=status.HTTP_200_OK)
 
-        templates = TimetableTemplate.objects.filter(division=student.division).order_by('day_of_week')
+        templates = TimetableTemplate.objects.filter(division=student.division).order_by('day_of_week', 'ui_order')
         from .serializers import TimetableTemplateSerializer
         serializer = TimetableTemplateSerializer(templates, many=True)
         
@@ -1622,9 +1622,29 @@ def get_weekly_timetable(request):
                 day_name = days_names[day_idx]
                 grouped[day_name].append(item)
 
+        # Calculate holidays for the current week (relative to today)
+        from datetime import date, timedelta
+        today = date.today()
+        today_weekday = today.weekday()  # 0 = Monday, 6 = Sunday
+        week_holidays = {}
+        for idx, day_name in enumerate(days_names):
+            day_date = today + timedelta(days=(idx - today_weekday))
+            holiday = Holiday.objects.filter(date=day_date, is_working_day=False).first()
+            if holiday:
+                week_holidays[day_name] = {
+                    "is_holiday": True,
+                    "holiday_name": holiday.name
+                }
+            else:
+                week_holidays[day_name] = {
+                    "is_holiday": False,
+                    "holiday_name": None
+                }
+
         return Response({
             "division_name": student.division.name,
-            "timetable": grouped
+            "timetable": grouped,
+            "holidays": week_holidays
         }, status=status.HTTP_200_OK)
 
     except Student.DoesNotExist:
@@ -1729,6 +1749,7 @@ def attendance_analytics(request):
     student_id = request.GET.get('student_id')
     department_id = request.GET.get('department')
     program = request.GET.get('program')
+    year = request.GET.get('year')
     student_search = request.GET.get('search_student')
     threshold_str = request.GET.get('threshold_percentage')
 
@@ -1744,6 +1765,8 @@ def attendance_analytics(request):
             students_queryset = students_queryset.filter(division_id=division_id)
         if department_id:
             students_queryset = students_queryset.filter(department_id=department_id)
+        if year:
+            students_queryset = students_queryset.filter(year=year)
         if program:
             from Home.models import TimetableTemplate, DailySession
             div_ids = set(TimetableTemplate.objects.filter(program__icontains=program).values_list('division_id', flat=True))
