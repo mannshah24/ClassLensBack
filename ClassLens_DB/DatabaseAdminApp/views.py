@@ -235,6 +235,11 @@ class TeacherViewSet(viewsets.ModelViewSet):
             for index, row in df.iterrows():
                 try:
                     department = Department.objects.get(name=row['department_name'])
+                    name = str(row.get('name', '')).strip()
+                    email = str(row.get('email', '')).strip()
+                    if not name or not email:
+                        raise ValueError("name and email are required fields")
+                    
                     teacher_data = {
                         'name': name,
                         'email': email,
@@ -911,10 +916,11 @@ def sync_staging_to_core(request):
                 counters["core_subjects_upserted"] += 1
 
             department = None
-            if enrollment.department_name:
-                department = _resolve_department(enrollment.department_name)
+            enrollment_dept_name = getattr(enrollment, "department_name", None)
+            if enrollment_dept_name:
+                department = _resolve_department(enrollment_dept_name)
                 if department is None:
-                    department, _ = Department.objects.get_or_create(name=enrollment.department_name)
+                    department, _ = Department.objects.get_or_create(name=enrollment_dept_name)
             if department is None:
                 department = student.department
 
@@ -1002,7 +1008,12 @@ class TimetableTemplateViewSet(viewsets.ModelViewSet):
 
                 # Bulk create new ones
                 new_templates = []
+                day_slot_counters = {}
                 for slot in slots:
+                    day = int(slot['day_of_week'])
+                    slot_idx = day_slot_counters.get(day, 0)
+                    day_slot_counters[day] = slot_idx + 1
+
                     new_templates.append(
                         TimetableTemplate(
                             department_id=department_id,
@@ -1010,9 +1021,10 @@ class TimetableTemplateViewSet(viewsets.ModelViewSet):
                             year=year,
                             division_id=division_id,
                             semester=semester,
-                            day_of_week=int(slot['day_of_week']),
+                            day_of_week=day,
                             subject_id=int(slot['subject']),
-                            default_teacher_id=int(slot['default_teacher'])
+                            default_teacher_id=int(slot['default_teacher']),
+                            ui_order=slot_idx
                         )
                     )
                 if new_templates:
@@ -1029,6 +1041,17 @@ class TeacherSubjectViewSet(viewsets.ModelViewSet):
     queryset = TeacherSubject.objects.all().select_related('teacher_id', 'subject', 'division')
     serializer_class = TeacherSubjectSerializer
     permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        subject_id = self.request.query_params.get('subject')
+        division_id = self.request.query_params.get('division')
+        if subject_id:
+            queryset = queryset.filter(subject_id=subject_id)
+        if division_id:
+            from django.db.models import Q
+            queryset = queryset.filter(Q(division_id=division_id) | Q(division__isnull=True))
+        return queryset
 
     @action(detail=False, methods=['post'], url_path='bulk-assign')
     def bulk_assign(self, request):
@@ -1072,6 +1095,7 @@ class TeacherSubjectViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['get'], url_path='mapping-details')
     def mapping_details(self, request):
         teacher_id = request.query_params.get('teacher_id')
+        division_id = request.query_params.get('division_id')
         if not teacher_id:
             return Response({"error": "teacher_id is required"}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -1080,17 +1104,28 @@ class TeacherSubjectViewSet(viewsets.ModelViewSet):
             # Find divisions in this teacher's department
             divisions = Division.objects.filter(department=teacher.department)
             # Find subjects mapped to this department (via SubjectFromDept)
-            sfd_subjects = Subject.objects.filter(subjectfromdept__department=teacher.department).distinct()
+            from django.db.models import Q
+            sfd_filter = Q(subjectfromdept__department=teacher.department)
+            if division_id and division_id != 'null' and division_id != 'None' and division_id != '':
+                division_obj = Division.objects.filter(id=division_id).first()
+                if division_obj:
+                    sfd_filter &= Q(subjectfromdept__year=division_obj.year)
+
+            sfd_subjects = Subject.objects.filter(sfd_filter).distinct()
             
             # If no subjects are mapped to their department, fallback to all subjects
             if not sfd_subjects.exists():
                 sfd_subjects = Subject.objects.all()
 
             # Mapped subject IDs for this teacher
-            mapped_subject_ids = list(
-                TeacherSubject.objects.filter(teacher_id=teacher)
-                .values_list('subject_id', flat=True)
-            )
+            ts_filter = TeacherSubject.objects.filter(teacher_id=teacher)
+            if division_id:
+                if division_id == 'null' or division_id == 'None' or division_id == '':
+                    ts_filter = ts_filter.filter(division__isnull=True)
+                else:
+                    ts_filter = ts_filter.filter(division_id=division_id)
+
+            mapped_subject_ids = list(ts_filter.values_list('subject_id', flat=True))
 
             # Serialize subjects and divisions
             from .serializers import DivisionSerializer, SubjectSerializer

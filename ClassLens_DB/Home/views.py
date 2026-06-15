@@ -33,6 +33,7 @@ except Exception:
 from .face_utils import extract_face_embedding
 import uuid
 from .tasks import evaluate_attendance, send_attendance_notifications
+from .utils import sync_all_attendance_percentages, sync_student_subject_attendance
 from django.core.files.storage import default_storage
 from celery.result import AsyncResult
 from pgvector.django import CosineDistance
@@ -1002,17 +1003,12 @@ def change_attendance(request, *args, **kwargs):
         attendance_record = AttendanceRecord.objects.filter(class_session_id=class_session_id, student_id=student_id).first()
         if attendance_record:
             attendance_record.status = not attendance_record.status
-            StudentAttendancePercentage.objects.filter(
-                student=attendance_record.student,
-                subject=attendance_record.class_session.subject
-            ).update(present_count=F('present_count') + (1 if attendance_record.status else -1))
-
-            StudentAttendancePercentage.objects.filter(
-                student=attendance_record.student,
-                subject=attendance_record.class_session.subject
-            ).update(attendancePercentage=(F('present_count')*100.0)/total_sessions)
-
             attendance_record.save()
+            
+            sync_student_subject_attendance(
+                attendance_record.student,
+                attendance_record.class_session.subject
+            )
             
             # Add to notification list
             notification_list.append((attendance_record.student, attendance_record.status))
@@ -1177,7 +1173,10 @@ def get_student_dashboard(request, *args, **kwargs):
         for enrollment in enrollments:
             subject = enrollment.subject
             
-            total_sessions = ClassSession.objects.filter(subject=subject).count()
+            total_sessions = AttendanceRecord.objects.filter(
+                student=student,
+                class_session__subject=subject
+            ).count()
             
             data = StudentAttendancePercentage.objects.filter(
                 student=student,
@@ -1185,11 +1184,13 @@ def get_student_dashboard(request, *args, **kwargs):
             ).first()
 
             if data is None:
-                percentage = 0
                 present_count = 0
             else:
-                percentage = data.attendancePercentage
                 present_count = data.present_count
+
+            percentage = 0.0
+            if total_sessions > 0:
+                percentage = (present_count * 100.0) / total_sessions
 
             teacher = None
             if student.division is not None:
@@ -1426,30 +1427,43 @@ def get_daily_schedule(request):
             "sessions": []
         }, status=status.HTTP_200_OK)
 
-    # Trigger generation dynamically if no sessions exist
-    sessions = DailySession.objects.filter(date=target_date)
-    if not sessions.exists():
-        from .tasks import generate_daily_sessions
-        generate_daily_sessions(for_date_str=target_date.isoformat())
-        sessions = DailySession.objects.filter(date=target_date)
-
     # Filter by student_id or teacher_id
     student_id = request.GET.get('student_id')
     teacher_id = request.GET.get('teacher_id')
 
+    division_id = None
     if student_id:
         try:
             student = Student.objects.get(id=student_id)
-            if student.division:
-                sessions = sessions.filter(division=student.division)
-            else:
-                sessions = sessions.none()
+            division_id = student.division_id
         except Student.DoesNotExist:
             return Response({"error": "Student not found."}, status=status.HTTP_404_NOT_FOUND)
+    elif teacher_id:
+        division_ids = list(
+            TeacherSubject.objects.filter(teacher_id=teacher_id)
+            .exclude(division__isnull=True)
+            .values_list('division_id', flat=True)
+            .distinct()
+        )
+        if division_ids:
+            division_id = division_ids
+
+    # Trigger generation dynamically to sync daily sessions with timetable template
+    from .tasks import generate_daily_sessions
+    generate_daily_sessions(for_date_str=target_date.isoformat(), division_id=division_id)
+
+    sessions = DailySession.objects.filter(date=target_date)
+
+    if student_id:
+        if division_id:
+            sessions = sessions.filter(division_id=division_id)
+        else:
+            sessions = sessions.none()
 
     if teacher_id:
         sessions = sessions.filter(Q(teacher_id=teacher_id) | Q(proxy_teacher_id=teacher_id))
 
+    sessions = sessions.order_by('ui_order')
     serializer = DailySessionSerializer(sessions, many=True)
 
     return Response({
@@ -1457,6 +1471,25 @@ def get_daily_schedule(request):
         "holiday_name": None,
         "sessions": serializer.data
     }, status=status.HTTP_200_OK)
+
+
+@api_view(['POST'])
+def update_session_order(request):
+    """
+    Updates the ui_order of a DailySession.
+    Expects: session_id (int), ui_order (int)
+    """
+    session_id = request.data.get('session_id')
+    ui_order = request.data.get('ui_order')
+    if session_id is None or ui_order is None:
+        return Response({"error": "session_id and ui_order are required"}, status=400)
+    try:
+        session = DailySession.objects.get(id=session_id)
+        session.ui_order = ui_order
+        session.save(update_fields=['ui_order'])
+        return Response({"message": "ui_order updated successfully"}, status=200)
+    except DailySession.DoesNotExist:
+        return Response({"error": "Session not found"}, status=404)
 
 
 
@@ -1485,7 +1518,7 @@ def declare_holiday(request):
     Expected request body:
     {
         "date": "YYYY-MM-DD",
-        "name": "Emergency Closure / Strike",
+        "name": "Holiday",
         "is_working_day": false
     }
     """
@@ -1576,7 +1609,7 @@ def get_weekly_timetable(request):
                 "timetable": {}
             }, status=status.HTTP_200_OK)
 
-        templates = TimetableTemplate.objects.filter(division=student.division).order_by('day_of_week')
+        templates = TimetableTemplate.objects.filter(division=student.division).order_by('day_of_week', 'ui_order')
         from .serializers import TimetableTemplateSerializer
         serializer = TimetableTemplateSerializer(templates, many=True)
         
@@ -1589,9 +1622,29 @@ def get_weekly_timetable(request):
                 day_name = days_names[day_idx]
                 grouped[day_name].append(item)
 
+        # Calculate holidays for the current week (relative to today)
+        from datetime import date, timedelta
+        today = date.today()
+        today_weekday = today.weekday()  # 0 = Monday, 6 = Sunday
+        week_holidays = {}
+        for idx, day_name in enumerate(days_names):
+            day_date = today + timedelta(days=(idx - today_weekday))
+            holiday = Holiday.objects.filter(date=day_date, is_working_day=False).first()
+            if holiday:
+                week_holidays[day_name] = {
+                    "is_holiday": True,
+                    "holiday_name": holiday.name
+                }
+            else:
+                week_holidays[day_name] = {
+                    "is_holiday": False,
+                    "holiday_name": None
+                }
+
         return Response({
             "division_name": student.division.name,
-            "timetable": grouped
+            "timetable": grouped,
+            "holidays": week_holidays
         }, status=status.HTTP_200_OK)
 
     except Student.DoesNotExist:
@@ -1696,34 +1749,44 @@ def attendance_analytics(request):
     student_id = request.GET.get('student_id')
     department_id = request.GET.get('department')
     program = request.GET.get('program')
+    year = request.GET.get('year')
     student_search = request.GET.get('search_student')
     threshold_str = request.GET.get('threshold_percentage')
 
     try:
-        queryset = StudentAttendancePercentage.objects.all().select_related('student__division', 'subject')
+        # 1. Dynamically sync attendance cache table on demand
+        sync_all_attendance_percentages()
 
-        if subject_id:
-            queryset = queryset.filter(subject_id=subject_id)
-        if division_id:
-            queryset = queryset.filter(student__division_id=division_id)
+        # 2. Filter students matching criteria
+        students_queryset = Student.objects.all().select_related('division', 'department')
         if student_id:
-            queryset = queryset.filter(student_id=student_id)
+            students_queryset = students_queryset.filter(id=student_id)
+        if division_id:
+            students_queryset = students_queryset.filter(division_id=division_id)
         if department_id:
-            queryset = queryset.filter(student__department_id=department_id)
+            students_queryset = students_queryset.filter(department_id=department_id)
+        if year:
+            students_queryset = students_queryset.filter(year=year)
         if program:
             from Home.models import TimetableTemplate, DailySession
             div_ids = set(TimetableTemplate.objects.filter(program__icontains=program).values_list('division_id', flat=True))
             div_ids.update(DailySession.objects.filter(program__icontains=program).values_list('division_id', flat=True))
-            queryset = queryset.filter(student__division_id__in=div_ids)
+            students_queryset = students_queryset.filter(division_id__in=div_ids)
 
         student_profile = None
 
         if student_search:
             student = None
-            if student_search.strip().isdigit():
-                student = Student.objects.filter(prn=int(student_search.strip())).first()
+            search_str = student_search.strip()
+            if search_str.isdigit():
+                student = Student.objects.filter(prn=int(search_str)).first()
             if not student:
-                student = Student.objects.filter(name__icontains=student_search.strip()).first()
+                tokens = search_str.split()
+                if tokens:
+                    q_obj = Q()
+                    for token in tokens:
+                        q_obj &= Q(name__icontains=token)
+                    student = Student.objects.filter(q_obj).first()
             
             if student:
                 semester = _resolve_student_semester(student)
@@ -1816,16 +1879,60 @@ def attendance_analytics(request):
                     "semesters": semesters_data
                 }
                 
-                queryset = queryset.filter(student=student)
+                students_queryset = students_queryset.filter(id=student.id)
+            else:
+                students_queryset = students_queryset.none()
+
+        # If subject is filtered, keep only students enrolled in that subject
+        if subject_id:
+            enrolled_prns = StudentEnrollment.objects.filter(subject_id=subject_id).values_list('student_prn', flat=True)
+            students_queryset = students_queryset.filter(prn__in=enrolled_prns)
+
+        # Count total class sessions per student per subject in a single query
+        student_subject_totals = {}
+        totals_qs = AttendanceRecord.objects.filter(student__in=students_queryset).values('student_id', 'class_session__subject_id').annotate(count=Count('id'))
+        for item in totals_qs:
+            student_subject_totals[(item['student_id'], item['class_session__subject_id'])] = item['count']
+
+        # Query StudentAttendancePercentage for filtered students
+        saps_queryset = StudentAttendancePercentage.objects.filter(student__in=students_queryset).select_related('subject')
+        from collections import defaultdict
+        student_saps = defaultdict(list)
+        for sap in saps_queryset:
+            student_saps[sap.student_id].append(sap)
+
+        # Map student PRN to their enrolled subjects
+        student_enrollments = defaultdict(list)
+        se_records = StudentEnrollment.objects.filter(student_prn__in=students_queryset.values_list('prn', flat=True))
+        for se in se_records:
+            student_enrollments[se.student_prn].append(se.subject_id)
 
         stats = []
-        for sap in queryset:
-            student = sap.student
-            subject = sap.subject
-            
-            # Count total sessions for this student and subject
-            total_sessions = AttendanceRecord.objects.filter(student=student, class_session__subject=subject).count()
-            percentage = sap.attendancePercentage
+        for student in students_queryset:
+            if subject_id:
+                sub_id = int(subject_id)
+                subject_obj = Subject.objects.filter(id=sub_id).first()
+                if not subject_obj:
+                    continue
+                sap_record = next((s for s in student_saps[student.id] if s.subject_id == sub_id), None)
+                present = sap_record.present_count if sap_record else 0
+                total = student_subject_totals.get((student.id, sub_id), 0)
+                percentage = (present * 100.0) / total if total > 0 else 0.0
+                subj_name = subject_obj.name
+                subj_code = subject_obj.code
+            else:
+                enrolled_subj_ids = student_enrollments.get(student.prn, [])
+                total = 0
+                present = 0
+                for s_id in enrolled_subj_ids:
+                    total += student_subject_totals.get((student.id, s_id), 0)
+                    sap_record = next((s for s in student_saps[student.id] if s.subject_id == s_id), None)
+                    if sap_record:
+                        present += sap_record.present_count
+                
+                percentage = (present * 100.0) / total if total > 0 else 0.0
+                subj_name = "All Subjects"
+                subj_code = "ALL"
 
             stats.append({
                 "student_id": student.id,
@@ -1834,23 +1941,13 @@ def attendance_analytics(request):
                 "email": student.email,
                 "division_name": student.division.name if student.division else "N/A",
                 "division_id": student.division_id,
-                "subject_id": subject.id,
-                "subject_name": subject.name,
-                "subject_code": subject.code,
-                "present_count": sap.present_count,
-                "total_sessions": total_sessions,
+                "subject_id": int(subject_id) if subject_id else None,
+                "subject_name": subj_name,
+                "subject_code": subj_code,
+                "present_count": present,
+                "total_sessions": total,
                 "attendance_percentage": round(percentage, 2)
             })
-
-        # Deduplicate stats list by (student_id, subject_id)
-        seen = set()
-        deduped_stats = []
-        for s in stats:
-            key = (s['student_id'], s['subject_id'])
-            if key not in seen:
-                seen.add(key)
-                deduped_stats.append(s)
-        stats = deduped_stats
 
         if threshold_str:
             try:
@@ -1867,5 +1964,3 @@ def attendance_analytics(request):
     except Exception as e:
         traceback.print_exc()
         return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-

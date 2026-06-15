@@ -33,10 +33,32 @@ class DailySessionSerializer(serializers.ModelSerializer):
     division_name = serializers.CharField(source='division.name', read_only=True)
     teacher_name = serializers.CharField(source='teacher.name', read_only=True)
     proxy_teacher_name = serializers.CharField(source='proxy_teacher.name', read_only=True)
+    attendance_marked = serializers.SerializerMethodField()
+    status = serializers.SerializerMethodField()
 
     class Meta:
         model = DailySession
         fields = '__all__'
+
+    def get_attendance_marked(self, obj):
+        from .models import AttendanceRecord
+        return AttendanceRecord.objects.filter(
+            class_session__subject=obj.subject,
+            student__division=obj.division,
+            class_session__class_datetime__date=obj.date
+        ).exists()
+
+    def get_status(self, obj):
+        if obj.is_cancelled:
+            return "Canceled"
+        from .models import AttendanceRecord
+        if AttendanceRecord.objects.filter(
+            class_session__subject=obj.subject,
+            student__division=obj.division,
+            class_session__class_datetime__date=obj.date
+        ).exists():
+            return "Completed"
+        return "Scheduled"
 
 
 

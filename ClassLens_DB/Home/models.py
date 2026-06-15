@@ -175,6 +175,7 @@ class TimetableTemplate(models.Model):
     year = models.IntegerField(null=True, blank=True)
     semester = models.IntegerField(null=True, blank=True)
     default_teacher = models.ForeignKey(Teacher, on_delete=models.CASCADE)
+    ui_order = models.PositiveIntegerField(default=0)
 
     def __str__(self):
         return f"{self.subject.name} - Day {self.day_of_week} ({self.division.name})"
@@ -189,10 +190,9 @@ class DailySession(models.Model):
     year = models.IntegerField(null=True, blank=True)
     semester = models.IntegerField(null=True, blank=True)
     teacher = models.ForeignKey(Teacher, on_delete=models.CASCADE)
-    start_time = models.TimeField(null=True, blank=True)
-    end_time = models.TimeField(null=True, blank=True)
     is_cancelled = models.BooleanField(default=False)
     proxy_teacher = models.ForeignKey(Teacher, on_delete=models.SET_NULL, null=True, blank=True, related_name='proxy_daily_sessions')
+    ui_order = models.PositiveIntegerField(default=0)
 
     def __str__(self):
         return f"{self.date} - {self.subject.name} ({self.division.name})"

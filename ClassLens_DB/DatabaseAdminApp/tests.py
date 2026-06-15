@@ -6,6 +6,7 @@ from PIL import Image
 from rest_framework.test import APIClient
 from unittest.mock import patch
 
+from django.core.files.uploadedfile import SimpleUploadedFile
 from Home.models import Department, Student
 from .serializers import StudentSerializer
 
@@ -29,8 +30,7 @@ class StudentFaceUpdateTests(TestCase):
 		buffer = BytesIO()
 		image.save(buffer, format="JPEG")
 		buffer.seek(0)
-		buffer.name = name
-		return buffer
+		return SimpleUploadedFile(name, buffer.read(), content_type="image/jpeg")
 
 	@patch("Home.views.extract_face_embedding", return_value=[0.1] * 512)
 	def test_register_student_accepts_photo_only_update(self, _mock_embedding):
@@ -58,3 +58,34 @@ class StudentFaceUpdateTests(TestCase):
 		updated_student = serializer.save()
 		self.assertEqual(len(updated_student.face_embedding), 512)
 		self.assertAlmostEqual(updated_student.face_embedding[0], 0.2)
+
+
+from .models import APIEnrollment, APIStudent
+
+class StagingToCoreSyncTests(TestCase):
+	def setUp(self):
+		self.client = APIClient()
+		self.department = Department.objects.create(name="Computer Science")
+
+	def test_sync_staging_to_core_with_enrollment_succeeds(self):
+		# Create staging APIStudent and APIEnrollment
+		APIStudent.objects.create(
+			prn=1001,
+			full_name="Student One",
+			email_id="student.one@example.com",
+			raw_payload={"email": "student.one@example.com", "department_name": "Computer Science"}
+		)
+		APIEnrollment.objects.create(
+			prn=1001,
+			subject_code="CS101",
+			division="A",
+			year=2,
+		)
+
+		# Make request to sync endpoint
+		response = self.client.post(reverse("sync-staging-to-core"))
+		self.assertEqual(response.status_code, 200)
+		self.assertIn("message", response.data)
+		self.assertEqual(response.data["counts"]["core_students_upserted"], 1)
+		self.assertEqual(response.data["counts"]["core_enrollments_upserted"], 1)
+
