@@ -1111,7 +1111,9 @@ def _resolve_student_program(student):
         return p
     if student.department:
         dept_name = student.department.name.lower()
-        if "computer" in dept_name or "cse" in dept_name:
+        if "mca" in dept_name or "master in computer applications" in dept_name:
+            return "MCA"
+        elif "computer" in dept_name or "cse" in dept_name:
             return "B.E. CSE"
         elif "electronics" in dept_name or "extc" in dept_name:
             return "B.E. EXTC"

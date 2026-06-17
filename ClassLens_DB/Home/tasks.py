@@ -486,7 +486,9 @@ def evaluate_additional_attendance(class_session_id: int, new_photo_ids: list, s
 @shared_task
 def generate_daily_sessions(for_date_str=None, division_id=None):
     from datetime import date
-    from .models import TimetableTemplate, DailySession, Holiday
+    from django.db import transaction
+    from .models import TimetableTemplate, DailySession, Holiday, Division
+    from collections import defaultdict
 
     if for_date_str:
         target_date = date.fromisoformat(for_date_str)
@@ -498,33 +500,152 @@ def generate_daily_sessions(for_date_str=None, division_id=None):
     if holiday:
         return f"Skipped: holiday '{holiday.name}' on {target_date}"
 
-    weekday = target_date.weekday()  # 0 = Monday, 6 = Sunday
-
-    templates = TimetableTemplate.objects.filter(day_of_week=weekday)
-    if division_id is not None:
-        if isinstance(division_id, (list, tuple, set)):
-            templates = templates.filter(division_id__in=division_id)
+    with transaction.atomic():
+        # Lock Division objects to serialize execution for the affected divisions
+        if division_id is not None:
+            if isinstance(division_id, (list, tuple, set)):
+                division_ids = list(division_id)
+                list(Division.objects.filter(id__in=division_ids).select_for_update())
+                sessions_q = DailySession.objects.filter(date=target_date, division_id__in=division_ids)
+            else:
+                Division.objects.select_for_update().filter(id=division_id).first()
+                sessions_q = DailySession.objects.filter(date=target_date, division_id=division_id)
         else:
-            templates = templates.filter(division_id=division_id)
+            list(Division.objects.all().select_for_update())
+            sessions_q = DailySession.objects.filter(date=target_date)
 
-    created = 0
-    for template in templates:
-        exists = DailySession.objects.filter(
-            subject=template.subject,
-            date=target_date,
-            division=template.division
-        ).exists()
-        if not exists:
-            DailySession.objects.create(
-                subject=template.subject,
-                date=target_date,
-                department=template.department,
-                program=template.program,
-                division=template.division,
-                year=template.year,
-                semester=template.semester,
-                teacher=template.default_teacher,
-                ui_order=template.ui_order
-            )
-            created += 1
+        # 1. Clean up exact duplicates (same subject, division, ui_order)
+        seen = set()
+        for session in list(sessions_q):
+            key = (session.subject_id, session.division_id, session.ui_order)
+            if key in seen:
+                session.delete()
+            else:
+                seen.add(key)
+
+        weekday = target_date.weekday()  # 0 = Monday, 6 = Sunday
+
+        templates = TimetableTemplate.objects.filter(day_of_week=weekday)
+        if division_id is not None:
+            if isinstance(division_id, (list, tuple, set)):
+                templates = templates.filter(division_id__in=division_id)
+            else:
+                templates = templates.filter(division_id=division_id)
+
+        # Group templates by (subject_id, division_id)
+        templates_by_key = defaultdict(list)
+        for t in templates:
+            key = (t.subject_id, t.division_id)
+            templates_by_key[key].append(t)
+
+        # Group existing sessions by (subject_id, division_id)
+        sessions_by_key = defaultdict(list)
+        for s in list(sessions_q):
+            key = (s.subject_id, s.division_id)
+            sessions_by_key[key].append(s)
+
+        from .models import AttendanceRecord
+        if division_id is not None:
+            if isinstance(division_id, (list, tuple, set)):
+                division_ids = list(division_id)
+            else:
+                division_ids = [division_id]
+        else:
+            division_ids = list(Division.objects.all().values_list('id', flat=True))
+
+        marked_subject_ids = set(
+            AttendanceRecord.objects.filter(
+                student__division_id__in=division_ids,
+                class_session__class_datetime__date=target_date
+            ).values_list('class_session__subject_id', flat=True)
+        )
+
+        created = 0
+
+        # A. Clean up stale sessions (subjects that are no longer in templates)
+        for key, s_list in sessions_by_key.items():
+            if key not in templates_by_key:
+                for session in s_list:
+                    # If it has no edits or attendance, delete it
+                    has_attendance = session.subject_id in marked_subject_ids
+                    if not session.is_cancelled and session.proxy_teacher_id is None and not has_attendance:
+                        session.delete()
+
+        # B. Sync existing sessions and create missing ones for active templates
+        for key, t_list in templates_by_key.items():
+            sub_id, div_id = key
+            s_list = sessions_by_key.get(key, [])
+            
+            # Remove exact duplicates if any (same subject, division, ui_order)
+            # which could cause counts to mismatch
+            unique_sessions = []
+            seen_ui_orders = set()
+            for session in s_list:
+                # If we see same ui_order twice, delete the second one
+                if session.ui_order in seen_ui_orders:
+                    # but only delete if it has no attendance/edits
+                    has_attendance = session.subject_id in marked_subject_ids
+                    if not session.is_cancelled and session.proxy_teacher_id is None and not has_attendance:
+                        session.delete()
+                    else:
+                        unique_sessions.append(session)
+                else:
+                    seen_ui_orders.add(session.ui_order)
+                    unique_sessions.append(session)
+            
+            existing_count = len(unique_sessions)
+            template_count = len(t_list)
+
+            # Sync fields of existing sessions to match templates
+            for idx in range(min(existing_count, template_count)):
+                session = unique_sessions[idx]
+                template = t_list[idx]
+                
+                # Update fields if they changed in template
+                updated = False
+                if session.teacher_id != template.default_teacher_id and session.proxy_teacher_id is None:
+                    session.teacher = template.default_teacher
+                    updated = True
+                if session.ui_order != template.ui_order:
+                    session.ui_order = template.ui_order
+                    updated = True
+                if session.department_id != template.department_id:
+                    session.department = template.department
+                    updated = True
+                if session.program != template.program:
+                    session.program = template.program
+                    updated = True
+                if session.year != template.year:
+                    session.year = template.year
+                    updated = True
+                if session.semester != template.semester:
+                    session.semester = template.semester
+                    updated = True
+                if updated:
+                    session.save()
+
+            if existing_count > template_count:
+                # Delete excess sessions if they are untouched
+                for session in unique_sessions[template_count:]:
+                    has_attendance = session.subject_id in marked_subject_ids
+                    if not session.is_cancelled and session.proxy_teacher_id is None and not has_attendance:
+                        session.delete()
+            elif existing_count < template_count:
+                # Create missing sessions
+                needed = template_count - existing_count
+                for i in range(needed):
+                    template = t_list[existing_count + i]
+                    DailySession.objects.create(
+                        subject=template.subject,
+                        date=target_date,
+                        department=template.department,
+                        program=template.program,
+                        division=template.division,
+                        year=template.year,
+                        semester=template.semester,
+                        teacher=template.default_teacher,
+                        ui_order=template.ui_order
+                    )
+                    created += 1
+                
     return f"Created {created} daily sessions for {target_date}"
