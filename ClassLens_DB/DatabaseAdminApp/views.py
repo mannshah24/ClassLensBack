@@ -685,6 +685,7 @@ class DivisionViewSet(viewsets.ModelViewSet):
     queryset = Division.objects.all().select_related('department')
     serializer_class = DivisionSerializer
     permission_classes = [IsAuthenticated]
+    pagination_class = None
 
     def get_queryset(self):
         queryset = super().get_queryset()
