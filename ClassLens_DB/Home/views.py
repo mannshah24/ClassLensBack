@@ -32,7 +32,7 @@ except Exception:
 
 from .face_utils import extract_face_embedding
 import uuid
-from .tasks import evaluate_attendance, send_attendance_notifications
+from .tasks import evaluate_attendance, send_attendance_notifications, process_student_face_embedding
 from .utils import sync_all_attendance_percentages, sync_student_subject_attendance
 from django.core.files.storage import default_storage
 from celery.result import AsyncResult
@@ -414,6 +414,27 @@ def verify_otp(request, *args, **kwargs):
             status=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 
+def save_uploaded_photo_temp(photo):
+    import os
+    import uuid
+    from django.conf import settings
+    
+    # Create media/pending_faces directory if it doesn't exist
+    pending_dir = os.path.join(settings.MEDIA_ROOT, 'pending_faces')
+    os.makedirs(pending_dir, exist_ok=True)
+    
+    # Create unique filename with UUID and preserve extension if possible
+    ext = os.path.splitext(photo.name)[1] or '.jpg'
+    filename = f"{uuid.uuid4()}{ext}"
+    temp_path = os.path.join(pending_dir, filename)
+    
+    # Save the file
+    with open(temp_path, 'wb+') as destination:
+        for chunk in photo.chunks():
+            destination.write(chunk)
+            
+    return temp_path
+
 def _update_student_password(prn, password, photo):
     if prn is None or password is None:
         return Response(
@@ -428,29 +449,32 @@ def _update_student_password(prn, password, photo):
             status=status.HTTP_404_NOT_FOUND,
         )
 
-    student.password_hash = make_password(password)
-
     if photo is not None:
         try:
-            embedding = extract_face_embedding(photo)
-            student.face_embedding = [float(value) for value in embedding]
-        except ValueError as exc:
-            return Response(
-                {"error": str(exc)},
-                status=status.HTTP_400_BAD_REQUEST,
+            temp_path = save_uploaded_photo_temp(photo)
+            task = process_student_face_embedding.delay(
+                student_prn=student.prn,
+                temp_image_path=temp_path,
+                is_registration=True,
+                password=password
             )
-
-    student.save()
-    print(f"✓ Student password set successfully for PRN {prn}")
-    print(f"  Hash (first 20 chars): {student.password_hash[:20]}...")
-
-    verify = Student.objects.get(prn=prn)
-    if verify.password_hash:
-        print(f"✓ Verified: Password hash persisted in database for PRN {prn}")
+            return Response(
+                {
+                    "message": "Student registration and face embedding processing started.",
+                    "task_id": task.id
+                },
+                status=status.HTTP_202_ACCEPTED
+            )
+        except Exception as e:
+            traceback.print_exc()
+            return Response(
+                {"error": f"Failed to save temporary photo: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+    else:
+        student.password_hash = make_password(password)
+        student.save()
         return Response({"message": "Student password set successfully"}, status=200)
-
-    print(f"✗ ERROR: Password hash is None after save for PRN {prn}!")
-    return Response({"detail": "Failed to persist password"}, status=500)
 
 @api_view(["POST"])
 def set_password(request, *args, **kwargs):
@@ -500,21 +524,37 @@ def register_student(request, *args, **kwargs):
     password = request.data.get("password")
     photo = request.FILES.get("photo")
 
-    if password is None and photo is not None:
-        student = Student.objects.filter(prn=prn).first()
-        if not student:
-            return Response(
-                {"detail": "No Student found with this prn"},
-                status=status.HTTP_404_NOT_FOUND,
-            )
+    if prn is None:
+        return Response({"detail": "prn is required"}, status=status.HTTP_400_BAD_REQUEST)
 
+    student = Student.objects.filter(prn=prn).first()
+    if not student:
+        return Response(
+            {"detail": "No Student found with this prn"},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+    if password is None and photo is not None:
         try:
-            embedding = extract_face_embedding(photo)
-            student.face_embedding = [float(value) for value in embedding]
-            student.save(update_fields=["face_embedding"])
-            return Response({"message": "Student face updated successfully"}, status=200)
-        except ValueError as exc:
-            return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+            temp_path = save_uploaded_photo_temp(photo)
+            task = process_student_face_embedding.delay(
+                student_prn=student.prn,
+                temp_image_path=temp_path,
+                is_registration=False
+            )
+            return Response(
+                {
+                    "message": "Student face embedding processing started.",
+                    "task_id": task.id
+                },
+                status=status.HTTP_202_ACCEPTED
+            )
+        except Exception as e:
+            traceback.print_exc()
+            return Response(
+                {"error": f"Failed to save temporary photo: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 
     return _update_student_password(prn, password, photo)
     
@@ -563,12 +603,25 @@ def update_face(request, *args, **kwargs):
             return Response({"detail": "No Student found with this prn"}, status=status.HTTP_404_NOT_FOUND)
 
         try:
-            embedding = extract_face_embedding(photo)
-            student.face_embedding = [float(value) for value in embedding]
-            student.save(update_fields=["face_embedding"])
-            return Response({"message": "Student face updated successfully"}, status=200)
-        except ValueError as exc:
-            return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+            temp_path = save_uploaded_photo_temp(photo)
+            task = process_student_face_embedding.delay(
+                student_prn=student.prn,
+                temp_image_path=temp_path,
+                is_registration=False
+            )
+            return Response(
+                {
+                    "message": "Student face embedding processing started.",
+                    "task_id": task.id
+                },
+                status=status.HTTP_202_ACCEPTED
+            )
+        except Exception as e:
+            traceback.print_exc()
+            return Response(
+                {"error": f"Failed to save temporary photo: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 
     except Exception as e:
         traceback.print_exc()
@@ -1326,6 +1379,93 @@ def remove_notification_token(request, *args, **kwargs):
             status=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
     
+@api_view(["POST"])
+def update_teacher_notification_token(request, *args, **kwargs):
+    """
+    Updates the FCM notification token for a teacher.
+    Expects: teacher_id, notification_token
+    """
+    try:
+        teacher_id = request.data.get("teacher_id")
+        notification_token = request.data.get("notification_token")
+
+        if teacher_id is None or notification_token is None:
+            return Response(
+                {"detail": "teacher_id and notification_token are required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        teacher = get_object_or_404(Teacher, id=teacher_id)
+        teacher.notification_token = notification_token
+        teacher.save()
+
+        return Response(
+            {"message": "Notification token updated successfully"},
+            status=status.HTTP_200_OK,
+        )
+
+    except Exception as e:
+        traceback.print_exc()
+        return Response(
+            {"detail": "Something went wrong"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+
+@api_view(["POST"])
+def remove_teacher_notification_token(request, *args, **kwargs):
+    """
+    Removes the FCM notification token for a teacher (on logout).
+    Expects: teacher_id
+    """
+    try:
+        teacher_id = request.data.get("teacher_id")
+
+        if teacher_id is None:
+            return Response(
+                {"detail": "teacher_id is required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        teacher = get_object_or_404(Teacher, id=teacher_id)
+        teacher.notification_token = None
+        teacher.save()
+
+        return Response(
+            {"message": "Notification token removed successfully"},
+            status=status.HTTP_200_OK,
+        )
+
+    except Exception as e:
+        traceback.print_exc()
+        return Response(
+            {"detail": "Something went wrong"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+
+@api_view(["GET"])
+def task_status(request, task_id, *args, **kwargs):
+    """
+    Generic endpoint to query the execution status of any Celery task.
+    """
+    if not task_id:
+        return Response({"error": "Task ID is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+    task = AsyncResult(task_id)
+    response_data = {
+        "status": task.status,
+    }
+
+    if task.state == "SUCCESS":
+        response_data["result"] = task.result
+        return Response(response_data, status=status.HTTP_200_OK)
+    elif task.state == "FAILURE":
+        response_data["error"] = str(task.result) or "Task execution failed"
+        return Response(response_data, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    return Response(response_data, status=status.HTTP_202_ACCEPTED)
+
 @api_view(["GET"])
 def health(request,*args,**kwargs):
     return Response(

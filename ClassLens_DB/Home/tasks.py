@@ -151,6 +151,71 @@ def send_attendance_notifications(student_records, subject_name, class_datetime)
             except Exception as e:
                 print(f"Failed to send notification to {student.name}: {e}")
 
+def send_student_registration_notification(student, is_success, message_body):
+    """
+    Send push notification to student confirming registration/face update status.
+    """
+    initialize_firebase()
+    
+    if firebase_admin is None or not firebase_admin._apps:
+        print("Firebase not initialized, skipping student notifications")
+        return
+        
+    if student.notification_token:
+        try:
+            title = "Face ID Registration Completed" if is_success else "Face ID Registration Failed"
+            message = messaging.Message(
+                notification=messaging.Notification(
+                    title=title,
+                    body=message_body,
+                ),
+                data={
+                    "type": "registration",
+                    "status": "success" if is_success else "failure",
+                },
+                token=student.notification_token,
+            )
+            response = messaging.send(message)
+            print(f"Notification sent to student {student.name}: {response}")
+        except Exception as e:
+            print(f"Failed to send notification to student {student.name}: {e}")
+
+def send_teacher_attendance_notification(teacher_token, is_success, subject_name, present_count=0, absent_count=0, error_message=None):
+    """
+    Send push notification to teacher about attendance completion.
+    """
+    initialize_firebase()
+    
+    if firebase_admin is None or not firebase_admin._apps:
+        print("Firebase not initialized, skipping teacher notifications")
+        return
+        
+    if teacher_token:
+        try:
+            if is_success:
+                title = f"Attendance Processed - {subject_name}"
+                body = f"Attendance processing completed successfully. Present: {present_count}, Absent: {absent_count}."
+            else:
+                title = f"Attendance Failed - {subject_name}"
+                body = f"Attendance processing failed. {error_message or 'Please try resubmitting.'}"
+                
+            message = messaging.Message(
+                notification=messaging.Notification(
+                    title=title,
+                    body=body,
+                ),
+                data={
+                    "type": "teacher_attendance",
+                    "status": "success" if is_success else "failure",
+                    "subject": subject_name,
+                },
+                token=teacher_token,
+            )
+            response = messaging.send(message)
+            print(f"Notification sent to teacher: {response}")
+        except Exception as e:
+            print(f"Failed to send notification to teacher: {e}")
+
 @shared_task
 def evaluate_attendance(total_sessions, class_session_id: int, scheme, host, division_id=None):
 
@@ -648,4 +713,97 @@ def generate_daily_sessions(for_date_str=None, division_id=None):
                     )
                     created += 1
                 
-    return f"Created {created} daily sessions for {target_date}"
+    return f"Created {created} daily sessions for {target_date}"
+
+@shared_task
+def process_student_face_embedding(student_prn, temp_image_path, is_registration, password=None):
+    from .models import Student
+    from django.contrib.auth.hashers import make_password
+    from .face_utils import extract_face_embedding
+    import os
+
+    try:
+        student = Student.objects.get(prn=student_prn)
+    except Student.DoesNotExist:
+        if os.path.exists(temp_image_path):
+            try:
+                os.remove(temp_image_path)
+            except Exception:
+                pass
+        return {"status": "FAILED", "error": f"Student with PRN {student_prn} not found."}
+
+    try:
+        if not os.path.exists(temp_image_path):
+            raise ValueError("Temporary image file not found.")
+
+        # Extract face embedding
+        with open(temp_image_path, 'rb') as f:
+            embedding = extract_face_embedding(f)
+        
+        student.face_embedding = [float(value) for value in embedding]
+        
+        if is_registration and password:
+            student.password_hash = make_password(password)
+
+        student.save()
+        
+        # Cleanup
+        if os.path.exists(temp_image_path):
+            os.remove(temp_image_path)
+
+        # Notify
+        msg = "Your face registration has been completed successfully." if is_registration else "Your face ID image has been updated successfully."
+        send_student_registration_notification(student, is_success=True, message_body=msg)
+
+        return {"status": "SUCCESS", "message": msg}
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        if os.path.exists(temp_image_path):
+            try:
+                os.remove(temp_image_path)
+            except Exception:
+                pass
+        
+        err_msg = str(e)
+        notify_msg = f"Registration/Face update failed: {err_msg}"
+        send_student_registration_notification(student, is_success=False, message_body=notify_msg)
+        raise e
+
+from celery.signals import task_failure, task_success
+
+@task_failure.connect
+def on_task_failure(sender, task_id, exception, args, kwargs, traceback, einfo, **extra_kwargs):
+    if sender.name in ['Home.tasks.evaluate_attendance', 'Home.tasks.evaluate_additional_attendance']:
+        try:
+            class_session_id = args[1] if sender.name == 'Home.tasks.evaluate_attendance' else args[0]
+            session = ClassSession.objects.get(id=class_session_id)
+            teacher_token = session.teacher.notification_token
+            if teacher_token:
+                send_teacher_attendance_notification(
+                    teacher_token=teacher_token,
+                    is_success=False,
+                    subject_name=session.subject.name,
+                    error_message="Attendance processing failed. Please try resubmitting."
+                )
+        except Exception as e:
+            print(f"Error in failure signal handler: {e}")
+
+@task_success.connect
+def on_task_success(sender, result, **kwargs):
+    if sender.name in ['Home.tasks.evaluate_attendance', 'Home.tasks.evaluate_additional_attendance']:
+        try:
+            class_session_id = result.get("class_session_id")
+            session = ClassSession.objects.get(id=class_session_id)
+            teacher_token = session.teacher.notification_token
+            if teacher_token:
+                send_teacher_attendance_notification(
+                    teacher_token=teacher_token,
+                    is_success=True,
+                    subject_name=session.subject.name,
+                    present_count=result.get("present_count", 0),
+                    absent_count=result.get("absent_count", 0)
+                )
+        except Exception as e:
+            print(f"Error in success signal handler: {e}")
