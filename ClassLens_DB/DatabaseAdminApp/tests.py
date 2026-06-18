@@ -1,6 +1,6 @@
 from io import BytesIO
 
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.urls import reverse
 from PIL import Image
 from rest_framework.test import APIClient
@@ -32,7 +32,8 @@ class StudentFaceUpdateTests(TestCase):
 		buffer.seek(0)
 		return SimpleUploadedFile(name, buffer.read(), content_type="image/jpeg")
 
-	@patch("Home.views.extract_face_embedding", return_value=[0.1] * 512)
+	@override_settings(CELERY_TASK_ALWAYS_EAGER=True)
+	@patch("Home.face_utils.extract_face_embedding", return_value=[0.1] * 512)
 	def test_register_student_accepts_photo_only_update(self, _mock_embedding):
 		response = self.client.post(
 			reverse("register_student"),
@@ -40,8 +41,9 @@ class StudentFaceUpdateTests(TestCase):
 			format="multipart",
 		)
 
-		self.assertEqual(response.status_code, 200)
-		self.assertEqual(response.data["message"], "Student face updated successfully")
+		self.assertEqual(response.status_code, 202)
+		self.assertEqual(response.data["message"], "Student face embedding processing started.")
+		self.assertIn("task_id", response.data)
 		self.student.refresh_from_db()
 		self.assertEqual(len(self.student.face_embedding), 512)
 		self.assertAlmostEqual(self.student.face_embedding[0], 0.1)

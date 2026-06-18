@@ -281,20 +281,26 @@ def evaluate_attendance(total_sessions, class_session_id: int, scheme, host, div
             facial_area = face_data['facial_area']
             x, y, w, h = facial_area['x'], facial_area['y'], facial_area['w'], facial_area['h']
 
-            _restorer = get_restorer()
-            if _restorer is not None:
-                try:
-                    _, restored_list, _ = _restorer.enhance(
-                        face_crop_bgr,
-                        has_aligned=False,
-                        only_center_face=True,
-                        paste_back=False,
-                        weight=0.1
-                    )
-                except Exception:
-                    restored_list = []
-            else:
-                restored_list = []
+            # Read configurable settings
+            face_rec_threshold = getattr(settings, 'FACE_RECOGNITION_THRESHOLD', 0.35)
+            gfpgan_enhance_weight = getattr(settings, 'GFPGAN_ENHANCE_WEIGHT', 0.6)
+            gfpgan_min_face_size = getattr(settings, 'GFPGAN_MIN_FACE_SIZE', 80)
+
+            # Preprocessing: Skip GFPGAN for large/high-fidelity faces
+            restored_list = []
+            if w < gfpgan_min_face_size or h < gfpgan_min_face_size:
+                _restorer = get_restorer()
+                if _restorer is not None:
+                    try:
+                        _, restored_list, _ = _restorer.enhance(
+                            face_crop_bgr,
+                            has_aligned=True, # Prevent restorer from doing double-alignment
+                            only_center_face=True,
+                            paste_back=False,
+                            weight=gfpgan_enhance_weight
+                        )
+                    except Exception:
+                        restored_list = []
 
             face_to_scan = restored_list[0] if restored_list else face_crop_bgr
 
@@ -306,7 +312,7 @@ def evaluate_attendance(total_sessions, class_session_id: int, scheme, host, div
                     model_name='Facenet512',
                     detector_backend='retinaface',
                     enforce_detection=False,
-                    align=True
+                    align=False # Pre-aligned crop, avoid warp distortion
                 )
                 captured_embedding = embedding_result[0]['embedding']
             except Exception:
@@ -327,7 +333,7 @@ def evaluate_attendance(total_sessions, class_session_id: int, scheme, host, div
                     best_score = distance
                     best_prn = prn
 
-            if best_score < 0.4:
+            if best_score < face_rec_threshold:
                 present_student_prns.add(best_prn)
                 cv2.rectangle(img_bgr, (x, y), (x + w, y + h), (0, 255, 0), 2)
             else:
@@ -449,21 +455,27 @@ def evaluate_additional_attendance(class_session_id: int, new_photo_ids: list, s
             facial_area = face_data['facial_area']
             x, y, w, h = facial_area['x'], facial_area['y'], facial_area['w'], facial_area['h']
             
-            _restorer = get_restorer()
-            if _restorer is not None:
-                try:
-                    _, restored_list, _ = _restorer.enhance(
-                        face_crop_bgr,
-                        has_aligned=False,
-                        only_center_face=True,
-                        paste_back=False,
-                        weight=0.1
-                    )
-                except Exception:
-                    restored_list = []
-            else:
-                restored_list = []
-                
+            # Read configurable settings
+            face_rec_threshold = getattr(settings, 'FACE_RECOGNITION_THRESHOLD', 0.35)
+            gfpgan_enhance_weight = getattr(settings, 'GFPGAN_ENHANCE_WEIGHT', 0.6)
+            gfpgan_min_face_size = getattr(settings, 'GFPGAN_MIN_FACE_SIZE', 80)
+
+            # Preprocessing: Skip GFPGAN for large/high-fidelity faces
+            restored_list = []
+            if w < gfpgan_min_face_size or h < gfpgan_min_face_size:
+                _restorer = get_restorer()
+                if _restorer is not None:
+                    try:
+                        _, restored_list, _ = _restorer.enhance(
+                            face_crop_bgr,
+                            has_aligned=True, # Prevent restorer from doing double-alignment
+                            only_center_face=True,
+                            paste_back=False,
+                            weight=gfpgan_enhance_weight
+                        )
+                    except Exception:
+                        restored_list = []
+
             face_to_scan = restored_list[0] if restored_list else face_crop_bgr
             face_to_scan_rgb = cv2.cvtColor(face_to_scan, cv2.COLOR_BGR2RGB)
             
@@ -473,7 +485,7 @@ def evaluate_additional_attendance(class_session_id: int, new_photo_ids: list, s
                     model_name='Facenet512',
                     detector_backend='retinaface',
                     enforce_detection=False,
-                    align=True
+                    align=False # Pre-aligned crop, avoid warp distortion
                 )
                 captured_embedding = embedding_result[0]['embedding']
             except Exception:
@@ -488,15 +500,17 @@ def evaluate_additional_attendance(class_session_id: int, new_photo_ids: list, s
             best_prn = None
             
             for prn, known_emb in known_embeddings.items():
+                print(prn)
                 distance = cosine(known_emb, captured_embedding)
                 if distance < best_score:
                     best_score = distance
                     best_prn = prn
                     
-            if best_score < 0.4:
+            if best_score < face_rec_threshold:
                 present_student_prns.add(best_prn)
                 cv2.rectangle(img_bgr, (x, y), (x + w, y + h), (0, 255, 0), 2)
             else:
+                print(best_score)
                 cv2.rectangle(img_bgr, (x, y), (x + w, y + h), (0, 0, 255), 2)
                 
         unique_id = uuid.uuid4()
