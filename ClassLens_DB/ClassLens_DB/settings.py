@@ -33,6 +33,7 @@ SECRET_KEY = env("SECRET_KEY")
 DEBUG = True
 
 ALLOWED_HOSTS = [
+    '10.52.71.247',
     '172.26.13.17',
     '192.168.1.5',
     '172.16.141.76',
@@ -184,6 +185,21 @@ CELERY_RESULT_SERIALIZER = 'json'
 CELERY_TIMEZONE = TIME_ZONE
 CELERY_TASK_TRACK_STARTED = True
 CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
+
+from kombu import Queue
+CELERY_TASK_DEFAULT_QUEUE = 'celery'
+CELERY_TASK_QUEUES = (
+    Queue('celery'),
+    Queue('attendance'),
+    Queue('registration'),
+)
+CELERY_QUEUES = CELERY_TASK_QUEUES
+
+CELERY_TASK_ROUTES = {
+    'Home.tasks.evaluate_attendance': {'queue': 'attendance'},
+    'Home.tasks.evaluate_additional_attendance': {'queue': 'attendance'},
+    'Home.tasks.process_student_face_embedding': {'queue': 'registration'},
+}
 
 # Email Configuration
 EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'

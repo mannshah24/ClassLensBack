@@ -16,6 +16,7 @@ class Teacher(models.Model):
         on_delete=models.CASCADE, 
     )
     date_joined=models.DateField(null=True,auto_now_add=True)
+    notification_token = models.TextField(null=True, blank=True)
     def __str__(self):
         return self.name
     

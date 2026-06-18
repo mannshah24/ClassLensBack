@@ -11,7 +11,9 @@ from Home.views import (
     get_student_subject_attendance, update_face, get_session_photos,
     resubmit_attendance, get_daily_schedule, get_weekly_timetable,
     student_bulk_upload, attendance_analytics, list_holidays,
-    declare_holiday, delete_holiday, update_session_order
+    declare_holiday, delete_holiday, update_session_order,
+    update_teacher_notification_token, remove_teacher_notification_token,
+    task_status
 )
 
 from django.conf import settings
@@ -80,6 +82,9 @@ urlpatterns = [
     re_path(r"^student/timetable/?$", get_weekly_timetable, name="get_weekly_timetable"),
     re_path(r"^students/bulk-upload/?$", student_bulk_upload, name="student_bulk_upload"),
     re_path(r"^admin/attendance/analytics/?$", attendance_analytics, name="attendance_analytics"),
+    re_path(r"^teacher/notification-token/?$", update_teacher_notification_token, name="update_teacher_notification_token"),
+    re_path(r"^teacher/notification-token/remove/?$", remove_teacher_notification_token, name="remove_teacher_notification_token"),
+    re_path(r"^taskStatus/(?P<task_id>[^/]+)/?$", task_status, name="task_status"),
 ]
 
 
