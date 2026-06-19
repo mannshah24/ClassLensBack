@@ -144,6 +144,13 @@ def send_attendance_notifications(student_records, subject_name, class_datetime)
                         "status": "present" if is_present else "absent",
                         "datetime": class_datetime.isoformat(),
                     },
+                    android=messaging.AndroidConfig(
+                        priority="high",
+                        notification=messaging.AndroidNotification(
+                            channel_id="attendance_channel",
+                            default_sound=True,
+                        ),
+                    ),
                     token=student.notification_token,
                 )
                 response = messaging.send(message)
@@ -173,6 +180,13 @@ def send_student_registration_notification(student, is_success, message_body):
                     "type": "registration",
                     "status": "success" if is_success else "failure",
                 },
+                android=messaging.AndroidConfig(
+                    priority="high",
+                    notification=messaging.AndroidNotification(
+                        channel_id="attendance_channel",
+                        default_sound=True,
+                    ),
+                ),
                 token=student.notification_token,
             )
             response = messaging.send(message)
@@ -209,6 +223,13 @@ def send_teacher_attendance_notification(teacher_token, is_success, subject_name
                     "status": "success" if is_success else "failure",
                     "subject": subject_name,
                 },
+                android=messaging.AndroidConfig(
+                    priority="high",
+                    notification=messaging.AndroidNotification(
+                        channel_id="attendance_channel",
+                        default_sound=True,
+                    ),
+                ),
                 token=teacher_token,
             )
             response = messaging.send(message)
