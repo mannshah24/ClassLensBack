@@ -45,6 +45,7 @@ ALLOWED_HOSTS = [
     'localhost',
     '127.0.0.1',
     '10.0.3.2',
+    'class-lens-web.vercel.app',
 ]
 
 
@@ -75,6 +76,13 @@ MIDDLEWARE = [
 ]
 
 CORS_ALLOW_ALL_ORIGINS = True
+
+CSRF_TRUSTED_ORIGINS = [
+    "https://class-lens-web.vercel.app",
+    "https://classlensfrontend.vercel.app",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+]
 
 ROOT_URLCONF = "ClassLens_DB.urls"
 
@@ -185,6 +193,7 @@ CELERY_RESULT_SERIALIZER = 'json'
 CELERY_TIMEZONE = TIME_ZONE
 CELERY_TASK_TRACK_STARTED = True
 CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
+CELERY_WORKER_ENABLE_REMOTE_CONTROL = False
 
 from kombu import Queue
 CELERY_TASK_DEFAULT_QUEUE = 'celery'
