@@ -25,5 +25,6 @@ CORS_ALLOWED_ORIGINS = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
     "https://classlensfrontend.vercel.app",
-    "https://class-lens-web.vercel.app"
+    "https://class-lens-web.vercel.app",
+    "https://lethargic-manifesto-showbiz.ngrok-free.dev"
 ]

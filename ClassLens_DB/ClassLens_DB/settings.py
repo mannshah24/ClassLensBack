@@ -46,6 +46,7 @@ ALLOWED_HOSTS = [
     '127.0.0.1',
     '10.0.3.2',
     'class-lens-web.vercel.app',
+    'lethargic-manifesto-showbiz.ngrok-free.dev',
 ]
 
 
@@ -82,6 +83,7 @@ CSRF_TRUSTED_ORIGINS = [
     "https://classlensfrontend.vercel.app",
     "http://localhost:3000",
     "http://127.0.0.1:3000",
+    "https://lethargic-manifesto-showbiz.ngrok-free.dev",
 ]
 
 ROOT_URLCONF = "ClassLens_DB.urls"
