@@ -32,7 +32,7 @@ def extract_face_embedding(photo):
         image_embedding = DeepFace.represent(
             img_path=img_arr,
             model_name="Facenet512",
-            detector_backend="retinaface",
+            detector_backend="ssd",
             enforce_detection=True,
         )[0]["embedding"]
 

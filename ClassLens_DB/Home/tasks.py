@@ -750,10 +750,37 @@ def generate_daily_sessions(for_date_str=None, division_id=None):
                 
     return f"Created {created} daily sessions for {target_date}"
 
+@shared_task(
+    bind=True,
+    autoretry_for=(ConnectionError, OSError, Exception),
+    retry_backoff=True,
+    max_retries=3
+)
+def send_otp_email_task(self, email, subject, plain_message, html_message, from_email):
+    from django.core.mail import send_mail
+    import socket
+    import smtplib
+    try:
+        send_mail(
+            subject=subject,
+            message=plain_message,
+            from_email=from_email,
+            recipient_list=[email],
+            html_message=html_message,
+            fail_silently=False,
+        )
+        print(f"OTP email sent successfully to {email}")
+        return True
+    except Exception as e:
+        print(f"Failed to send OTP email to {email}: {e}")
+        # Log a helpful message warning about potential local antivirus or firewall blockages
+        if isinstance(e, ConnectionAbortedError) or "10053" in str(e):
+            print("Tip: WinError 10053 usually indicates that local antivirus software (e.g., Avast, Kaspersky) or a Windows Firewall rule is actively aborting outbound connections on SMTP ports like 587.")
+        raise e
+
 @shared_task
 def process_student_face_embedding(student_prn, temp_image_path, is_registration, password=None):
     from .models import Student
-    from django.contrib.auth.hashers import make_password
     from .face_utils import extract_face_embedding
     import os
 
@@ -776,10 +803,6 @@ def process_student_face_embedding(student_prn, temp_image_path, is_registration
             embedding = extract_face_embedding(f)
         
         student.face_embedding = [float(value) for value in embedding]
-        
-        if is_registration and password:
-            student.password_hash = make_password(password)
-
         student.save()
         
         # Cleanup

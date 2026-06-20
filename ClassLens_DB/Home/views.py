@@ -32,7 +32,7 @@ except Exception:
 
 from .face_utils import extract_face_embedding
 import uuid
-from .tasks import evaluate_attendance, send_attendance_notifications, process_student_face_embedding
+from .tasks import evaluate_attendance, send_attendance_notifications, process_student_face_embedding, send_otp_email_task
 from .utils import sync_all_attendance_percentages, sync_student_subject_attendance
 from django.core.files.storage import default_storage
 from celery.result import AsyncResult
@@ -231,6 +231,7 @@ def get_subject_details(request, *args, **kwargs):
 @api_view(["POST"])
 def send_otp(request, *args, **kwargs):
     try:
+        import time
         email = request.data.get("email")
         otp = random.randint(1000, 9999)
 
@@ -256,13 +257,29 @@ def send_otp(request, *args, **kwargs):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
+        # Check OTP Cooldown
+        cooldown_key = f"otp_cooldown_{email}"
+        cooldown_expiry = cache.get(cooldown_key)
+        if cooldown_expiry is not None:
+            remaining = int(cooldown_expiry - time.time())
+            if remaining > 0:
+                return Response(
+                    {
+                        "detail": "Please wait before requesting a new OTP.",
+                        "cooldown_seconds": remaining
+                    },
+                    status=status.HTTP_429_TOO_MANY_REQUESTS
+                )
+
         cache.set(email, otp, 600)
+
+        # Set randomized cooldown between 60 and 180 seconds (1-3 minutes)
+        cooldown_seconds = random.randint(60, 180)
+        cache.set(cooldown_key, time.time() + cooldown_seconds, cooldown_seconds)
 
         print('OTP:', otp)
 
         display_name = teacher.name if teacher else student.name
-            
-        
 
         subject = "Your ClassLens OTP Verification Code"
 
@@ -290,17 +307,16 @@ def send_otp(request, *args, **kwargs):
         """
 
         try:
-            send_mail(
+            send_otp_email_task.delay(
+                email=email,
                 subject=subject,
-                message=plain_message,
-                from_email=settings.DEFAULT_FROM_EMAIL,
-                recipient_list=[email],
+                plain_message=plain_message,
                 html_message=html_message,
-                fail_silently=False,
+                from_email=settings.DEFAULT_FROM_EMAIL
             )
-            return Response({"message": "OTP sent successfully"}, status=200)
+            return Response({"message": "OTP sent successfully", "cooldown_seconds": cooldown_seconds}, status=200)
         except Exception as email_error:
-            print(f"Email send error: {email_error}")
+            print(f"Email send task error: {email_error}")
             return Response({"message": "Failed to send OTP"}, status=500)
 
     except Exception as e:
@@ -449,21 +465,23 @@ def _update_student_password(prn, password, photo):
             status=status.HTTP_404_NOT_FOUND,
         )
 
+    # Hash and save password synchronously immediately
+    student.password_hash = make_password(password)
+    student.save()
+
     if photo is not None:
         try:
             temp_path = save_uploaded_photo_temp(photo)
-            task = process_student_face_embedding.delay(
+            process_student_face_embedding.delay(
                 student_prn=student.prn,
                 temp_image_path=temp_path,
-                is_registration=True,
-                password=password
+                is_registration=True
             )
             return Response(
                 {
-                    "message": "Student registration and face embedding processing started.",
-                    "task_id": task.id
+                    "message": "Registration successful! Your Face ID photo is processing in the background. You can log in now, and your Face ID will be active for attendance in 1 hour."
                 },
-                status=status.HTTP_202_ACCEPTED
+                status=status.HTTP_200_OK
             )
         except Exception as e:
             traceback.print_exc()
@@ -472,8 +490,6 @@ def _update_student_password(prn, password, photo):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
     else:
-        student.password_hash = make_password(password)
-        student.save()
         return Response({"message": "Student password set successfully"}, status=200)
 
 @api_view(["POST"])
@@ -604,17 +620,16 @@ def update_face(request, *args, **kwargs):
 
         try:
             temp_path = save_uploaded_photo_temp(photo)
-            task = process_student_face_embedding.delay(
+            process_student_face_embedding.delay(
                 student_prn=student.prn,
                 temp_image_path=temp_path,
                 is_registration=False
             )
             return Response(
                 {
-                    "message": "Student face embedding processing started.",
-                    "task_id": task.id
+                    "message": "Your Face ID photo is processing in the background. It will be active for attendance in 1 hour."
                 },
-                status=status.HTTP_202_ACCEPTED
+                status=status.HTTP_200_OK
             )
         except Exception as e:
             traceback.print_exc()
@@ -862,7 +877,40 @@ def teacher_subjects(request, *args, **kwargs):
         subjects = TeacherSubject.objects.filter(teacher_id=teacher_id).select_related(
             "subject",
             "division",
+            "division__department",
+            "teacher_id__department"
         )
+
+        subject_ids = [row.subject_id for row in subjects]
+        division_ids = {row.division_id for row in subjects if row.division_id}
+
+        # Bulk fetch SubjectFromDept mappings
+        sfd_list = SubjectFromDept.objects.filter(
+            subject__id__in=subject_ids
+        ).select_related('department').prefetch_related('subject')
+
+        sfd_by_sub_dept_year = {}
+        sfd_by_subject = {}
+        for sfd in sfd_list:
+            for sub in sfd.subject.all():
+                sfd_by_sub_dept_year[(sub.id, sfd.department_id, sfd.year)] = sfd.semester
+                sfd_by_subject.setdefault(sub.id, []).append(sfd)
+
+        # Bulk fetch division students
+        division_students = {}
+        if division_ids:
+            students_qs = Student.objects.filter(division_id__in=division_ids).values('prn', 'division_id')
+            for s in students_qs:
+                division_students.setdefault(s['division_id'], set()).add(s['prn'])
+
+        # Bulk fetch enrollments
+        enrollments = StudentEnrollment.objects.filter(
+            subject_id__in=subject_ids
+        ).values('subject_id', 'student_prn')
+        
+        enrollments_by_subject = {}
+        for e in enrollments:
+            enrollments_by_subject.setdefault(e['subject_id'], []).append(e['student_prn'])
 
         clean_subjects = []
         existing_keys = set()
@@ -877,21 +925,14 @@ def teacher_subjects(request, *args, **kwargs):
                 dept_name = row.division.department.name
                 year = row.division.year
                 
-                # Try to resolve semester from SubjectFromDept with matching department and year
-                sfd = SubjectFromDept.objects.filter(
-                    subject=row.subject_id, 
-                    department=row.division.department, 
-                    year=row.division.year
-                ).first()
-                if sfd:
-                    semester = sfd.semester
+                # Resolve semester from pre-fetched SubjectFromDept maps
+                semester = sfd_by_sub_dept_year.get((row.subject_id, row.division.department_id, row.division.year))
             
             # 2. If division was not set or semester/dept/year not found, fallback to SubjectFromDept mapping
             if not dept_name or not year or not semester:
-                sfd_qs = SubjectFromDept.objects.filter(subject=row.subject_id)
-                sfd = sfd_qs.first()
-                
-                if sfd:
+                sfd_list_fallback = sfd_by_subject.get(row.subject_id, [])
+                if sfd_list_fallback:
+                    sfd = sfd_list_fallback[0]
                     if not dept_name:
                         dept_name = sfd.department.name
                     if not year:
@@ -901,16 +942,19 @@ def teacher_subjects(request, *args, **kwargs):
 
             # 3. Last fallbacks
             if not dept_name:
-                dept_name = row.teacher_id.department.name if row.teacher_id.department else "General"
+                dept_name = row.teacher_id.department.name if (row.teacher_id and row.teacher_id.department) else "General"
             if not year:
                 year = 1
             if not semester:
                 semester = 1
 
-            strength = StudentEnrollment.objects.filter(
-                subject_id=row.subject_id,
-                student_prn__in=Student.objects.filter(division_id=row.division_id).values_list("prn", flat=True),
-            ).count() if row.division_id else StudentEnrollment.objects.filter(subject_id=row.subject_id).count()
+            # Compute strength in memory
+            sub_prns = enrollments_by_subject.get(row.subject_id, [])
+            if row.division_id:
+                div_prns = division_students.get(row.division_id, set())
+                strength = sum(1 for prn in sub_prns if prn in div_prns)
+            else:
+                strength = len(sub_prns)
 
             clean_subjects.append({
                 "id": row.subject_id,
@@ -1100,14 +1144,31 @@ def teacher_profile(request,teacher_id, *args, **kwargs):
         teacher = get_object_or_404(Teacher, id=teacher_id)
         teacher_subject_qs = TeacherSubject.objects.filter(teacher_id_id=teacher_id).select_related("division")
         total_Subject = teacher_subject_qs.count()
+        
+        # Optimize student count queries
+        division_ids = {ts.division_id for ts in teacher_subject_qs if ts.division_id}
+        division_students_map = {}
+        if division_ids:
+            students = Student.objects.filter(division_id__in=division_ids).values('prn', 'division_id')
+            for s in students:
+                division_students_map.setdefault(s['division_id'], []).append(s['prn'])
+
+        subject_ids = [ts.subject_id for ts in teacher_subject_qs]
+        enrollments = StudentEnrollment.objects.filter(subject_id__in=subject_ids).values('subject_id', 'student_prn')
+        
+        enrollments_by_subject = {}
+        for e in enrollments:
+            enrollments_by_subject.setdefault(e['subject_id'], []).append(e['student_prn'])
+
         total_Student = 0
-        for teacher_subject in teacher_subject_qs:
-            enrollment_qs = StudentEnrollment.objects.filter(subject_id=teacher_subject.subject_id)
-            if teacher_subject.division_id:
-                enrollment_qs = enrollment_qs.filter(
-                    student_prn__in=Student.objects.filter(division_id=teacher_subject.division_id).values_list("prn", flat=True)
-                )
-            total_Student += enrollment_qs.count()
+        for ts in teacher_subject_qs:
+            sub_enrollment_prns = enrollments_by_subject.get(ts.subject_id, [])
+            if ts.division_id:
+                div_prns = set(division_students_map.get(ts.division_id, []))
+                total_Student += sum(1 for prn in sub_enrollment_prns if prn in div_prns)
+            else:
+                total_Student += len(sub_enrollment_prns)
+
         department = teacher.department.name if teacher.department else None
         profile_data = {
             "name": teacher.name,
@@ -1126,10 +1187,13 @@ def teacher_profile(request,teacher_id, *args, **kwargs):
         )
 
 
-def _resolve_student_semester(student):
-    subject_ids = set(
-        StudentEnrollment.objects.filter(student_prn=student.prn).values_list("subject_id", flat=True)
-    )
+def _resolve_student_semester(student, subject_ids=None):
+    if subject_ids is None:
+        subject_ids = set(
+            StudentEnrollment.objects.filter(student_prn=student.prn).values_list("subject_id", flat=True)
+        )
+    else:
+        subject_ids = set(subject_ids)
     subject_mappings = (
         SubjectFromDept.objects.filter(department=student.department, year=student.year)
         .prefetch_related("subject")
@@ -1219,51 +1283,71 @@ def get_student_dashboard(request, *args, **kwargs):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        student = get_object_or_404(Student, id=student_id)
-        semester = _resolve_student_semester(student)
-
+        student = get_object_or_404(Student.objects.select_related('department', 'division'), id=student_id)
+        
         enrollments = StudentEnrollment.objects.filter(student_prn=student.prn).select_related('subject')
+        subject_ids = [enrollment.subject_id for enrollment in enrollments]
+        
+        semester = _resolve_student_semester(student, subject_ids=subject_ids)
+
+        # Bulk fetch total session counts for this student and these subjects
+        attendance_counts = AttendanceRecord.objects.filter(
+            student=student,
+            class_session__subject_id__in=subject_ids
+        ).values('class_session__subject_id').annotate(count=Count('id'))
+        total_sessions_map = {item['class_session__subject_id']: item['count'] for item in attendance_counts}
+
+        # Bulk fetch StudentAttendancePercentage records
+        attendance_percentages = StudentAttendancePercentage.objects.filter(
+            student=student,
+            subject_id__in=subject_ids
+        )
+        present_count_map = {ap.subject_id: ap.present_count for ap in attendance_percentages}
+
+        # Bulk fetch TeacherSubject mappings
+        teacher_subjects = TeacherSubject.objects.filter(
+            subject_id__in=subject_ids
+        ).select_related('teacher_id')
+        
+        ts_by_subject = {}
+        for ts in teacher_subjects:
+            ts_by_subject.setdefault(ts.subject_id, []).append(ts)
 
         subjects_data = []
         for enrollment in enrollments:
             subject = enrollment.subject
-            
-            total_sessions = AttendanceRecord.objects.filter(
-                student=student,
-                class_session__subject=subject
-            ).count()
-            
-            data = StudentAttendancePercentage.objects.filter(
-                student=student,
-                subject=subject
-            ).first()
-
-            if data is None:
-                present_count = 0
-            else:
-                present_count = data.present_count
+            total_sessions = total_sessions_map.get(subject.id, 0)
+            present_count = present_count_map.get(subject.id, 0)
 
             percentage = 0.0
             if total_sessions > 0:
                 percentage = (present_count * 100.0) / total_sessions
 
-            teacher = None
-            if student.division is not None:
-                teacher = TeacherSubject.objects.filter(
-                    subject=subject,
-                    division=student.division
-                ).select_related('teacher_id').first()
-                if teacher is None:
-                    teacher = TeacherSubject.objects.filter(
-                        subject=subject,
-                        division__isnull=True
-                    ).select_related('teacher_id').first()
+            # Map teacher matching student division or fallback
+            ts_list = ts_by_subject.get(subject.id, [])
+            chosen_ts = None
+            if student.division_id:
+                for ts in ts_list:
+                    if ts.division_id == student.division_id:
+                        chosen_ts = ts
+                        break
+                if not chosen_ts:
+                    for ts in ts_list:
+                        if ts.division_id is None:
+                            chosen_ts = ts
+                            break
             else:
-                teacher = TeacherSubject.objects.filter(
-                    subject=subject
-                ).select_related('teacher_id').first()
+                for ts in ts_list:
+                    if ts.division_id is None:
+                        chosen_ts = ts
+                        break
+                if not chosen_ts and ts_list:
+                    chosen_ts = ts_list[0]
+                    
+            if not chosen_ts and ts_list:
+                chosen_ts = ts_list[0]
 
-            teacher_name = teacher.teacher_id.name if teacher else "N/A"
+            teacher_name = chosen_ts.teacher_id.name if (chosen_ts and chosen_ts.teacher_id) else "N/A"
 
             subjects_data.append({
                 "id": subject.id,

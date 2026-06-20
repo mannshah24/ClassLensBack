@@ -211,3 +211,101 @@ class HolidayAPIEndpointTests(TestCase):
 		self.assertEqual(response.status_code, 200)
 		self.assertFalse(Holiday.objects.filter(pk=h.pk).exists())
 
+
+from django.core.cache import cache
+from unittest.mock import patch
+
+class PerformanceOptimizationTests(TestCase):
+	def setUp(self):
+		self.client = APIClient()
+		self.department = Department.objects.create(name="Electronics")
+		self.teacher = Teacher.objects.create(
+			name="Teacher E",
+			email="teacher.e@example.com",
+			department=self.department
+		)
+		self.subject = Subject.objects.create(
+			code="EL101",
+			name="Basic Electronics"
+		)
+		self.division = Division.objects.create(
+			department=self.department,
+			year=1,
+			name="A"
+		)
+		self.teacher_subject = TeacherSubject.objects.create(
+			teacher_id=self.teacher,
+			subject=self.subject,
+			division=self.division
+		)
+		self.student = Student.objects.create(
+			prn=2001,
+			name="Student E",
+			email="student.e@example.com",
+			year=1,
+			department=self.department,
+			division=self.division
+		)
+		StudentEnrollment.objects.create(student_prn=self.student.prn, subject=self.subject)
+
+	def test_teacher_subjects_optimized(self):
+		response = self.client.get(reverse("teacher_subjects"), {"teacher_id": self.teacher.id})
+		self.assertEqual(response.status_code, 200)
+		self.assertIn("subjects", response.data)
+		self.assertEqual(len(response.data["subjects"]), 1)
+		self.assertEqual(response.data["subjects"][0]["strength"], 1)
+
+	def test_teacher_profile_optimized(self):
+		response = self.client.get(reverse("teacher_profile", kwargs={"teacher_id": self.teacher.id}))
+		self.assertEqual(response.status_code, 200)
+		self.assertIn("teacher_profile", response.data)
+		self.assertEqual(response.data["teacher_profile"]["total_subjects"], 1)
+		self.assertEqual(response.data["teacher_profile"]["total_students"], 1)
+
+	def test_get_student_dashboard_optimized(self):
+		response = self.client.post(reverse("get_student_dashboard"), {"student_id": self.student.id}, format="json")
+		self.assertEqual(response.status_code, 200)
+		self.assertIn("subjects", response.data)
+		self.assertEqual(len(response.data["subjects"]), 1)
+		self.assertEqual(response.data["student_name"], "Student E")
+
+	def test_send_otp_cooldown_jitter(self):
+		cache.clear()
+		# First request should succeed
+		response = self.client.post(reverse("send_otp"), {"email": self.student.email}, format="json")
+		self.assertEqual(response.status_code, 200)
+		
+		# Second request should be rate-limited with 429
+		response2 = self.client.post(reverse("send_otp"), {"email": self.student.email}, format="json")
+		self.assertEqual(response2.status_code, 429)
+		self.assertIn("cooldown_seconds", response2.data)
+		self.assertTrue(45 <= response2.data["cooldown_seconds"] <= 90)
+
+	@patch("Home.tasks.process_student_face_embedding.delay")
+	def test_instant_registration(self, mock_delay):
+		# We delete student password_hash to allow registration
+		self.student.password_hash = None
+		self.student.save()
+		
+		# Create a dummy image file
+		import io
+		from PIL import Image
+		file = io.BytesIO()
+		image = Image.new('RGB', (100, 100))
+		image.save(file, 'jpeg')
+		file.name = 'test.jpg'
+		file.seek(0)
+		
+		response = self.client.post(
+			reverse("register_student"),
+			{"prn": self.student.prn, "password": "newpassword", "photo": file},
+			format="multipart"
+		)
+		self.assertEqual(response.status_code, 200)
+		self.assertIn("Registration successful", response.data["message"])
+		
+		# Verify password is saved synchronously
+		self.student.refresh_from_db()
+		self.assertIsNotNone(self.student.password_hash)
+
+
