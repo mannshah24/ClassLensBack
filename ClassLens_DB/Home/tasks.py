@@ -32,6 +32,16 @@ try:
     import torchvision.transforms.functional as F
 except Exception:
     F = None
+
+# Monkeypatch torchvision.transforms.functional_tensor before importing gfpgan/basicsr
+module_name = 'torchvision.transforms.functional_tensor'
+if F is not None:
+    if module_name not in sys.modules:
+        import sys, types
+        functional_tensor_module = types.ModuleType(module_name)
+        functional_tensor_module.rgb_to_grayscale = F.rgb_to_grayscale
+        sys.modules[module_name] = functional_tensor_module
+
 try:
     import firebase_admin
     from firebase_admin import credentials, messaging
@@ -43,14 +53,6 @@ try:
     from gfpgan import GFPGANer
 except Exception:
     GFPGANer = None
-
-module_name = 'torchvision.transforms.functional_tensor'
-
-if F is not None:
-    if module_name not in sys.modules:
-        functional_tensor_module = types.ModuleType(module_name)
-        functional_tensor_module.rgb_to_grayscale = F.rgb_to_grayscale
-        sys.modules[module_name] = functional_tensor_module
 
 if torch is not None:
     _original_torch_load = torch.load
@@ -65,6 +67,14 @@ if torch is not None:
 from .models import Student, AttendanceRecord, ClassSession, StudentEnrollment, StudentAttendancePercentage
 from .utils import sync_student_subject_attendance
 from django.utils import timezone
+
+# Safe, device-agnostic fallback logic for GPU targeting
+device = None
+if torch is not None:
+    try:
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    except Exception:
+        device = 'cpu'
 
 # Defer GFPGAN restorer initialization until a task runs to avoid import-time file access
 restorer = None
@@ -96,14 +106,81 @@ def get_restorer():
             upscale=2,
             arch='clean',
             channel_multiplier=2,
-            bg_upsampler=None
+            bg_upsampler=None,
+            device=device
         )
-        print(f"GFPGAN restorer initialized with model: {model_path}")
+        print(f"GFPGAN restorer initialized with model: {model_path} on device: {device}")
     except Exception as e:
         print(f"Warning: GFPGAN restorer failed to initialize: {e}")
         restorer = None
 
     return restorer
+
+def enhance_faces_batched(restorer, face_crops, weight=0.6):
+    """
+    Restore a batch of face crops in a single forward pass on the target device.
+    Falls back to sequential processing on failure or if restorer is not available.
+    """
+    if not face_crops:
+        return []
+
+    if restorer is None:
+        return face_crops
+
+    import torch
+    from basicsr.utils import img2tensor, tensor2img
+    from torchvision.transforms.functional import normalize
+
+    target_device = getattr(restorer, 'device', 'cpu')
+    tensors = []
+    
+    try:
+        for face in face_crops:
+            # Resize crop to 512x512 as required by GFPGAN Clean architecture
+            face_resized = cv2.resize(face, (512, 512))
+            # Convert image to float tensor, normalize, and prepend channel dimension
+            face_t = img2tensor(face_resized / 255.0, bgr2rgb=True, float32=True)
+            normalize(face_t, (0.5, 0.5, 0.5), (0.5, 0.5, 0.5), inplace=True)
+            tensors.append(face_t)
+            
+        # Stack all face tensors into a single batch: (Batch, Channel, Height, Width)
+        batch_t = torch.stack(tensors).to(target_device)
+        
+        restored_faces = []
+        with torch.no_grad():
+            # GFPGAN forward pass
+            outputs = restorer.gfpgan(batch_t, return_rgb=False, weight=weight)
+            
+            # Convert output tensors back to numpy images
+            for i in range(outputs.size(0)):
+                out_t = outputs[i]
+                # Explicitly move to CPU for safety before passing to tensor2img
+                out_t_cpu = out_t.cpu()
+                restored_face = tensor2img(out_t_cpu, rgb2bgr=True, min_max=(-1, 1))
+                restored_faces.append(restored_face.astype(np.uint8))
+                
+        return restored_faces
+    except Exception as e:
+        print(f"Warning: Batched GFPGAN inference failed: {e}. Falling back to sequential enhancement.")
+        # Device-agnostic fallback: process sequentially using standard enhance method
+        restored_faces = []
+        for face in face_crops:
+            try:
+                _, restored, _ = restorer.enhance(
+                    face,
+                    has_aligned=True,
+                    only_center_face=True,
+                    paste_back=False,
+                    weight=weight
+                )
+                if restored:
+                    restored_faces.append(restored[0].astype(np.uint8))
+                else:
+                    restored_faces.append(face)
+            except Exception as inner_e:
+                print(f"GFPGAN enhancement fallback failed for face: {inner_e}")
+                restored_faces.append(face)
+        return restored_faces
 
 def initialize_firebase():
     if firebase_admin is None or credentials is None:
@@ -283,6 +360,13 @@ def evaluate_attendance(total_sessions, class_session_id: int, scheme, host, div
         if img_bgr is None:
             continue
 
+        # Resize image to a maximum dimension of 1600px to speed up CPU-bound face detection
+        max_dim = 1600
+        h, w = img_bgr.shape[:2]
+        if max(h, w) > max_dim:
+            scale = max_dim / max(h, w)
+            img_bgr = cv2.resize(img_bgr, (int(w * scale), int(h * scale)))
+
         try:
             all_face_data = DeepFace.extract_faces(
                 img_path=img_bgr,
@@ -295,43 +379,55 @@ def evaluate_attendance(total_sessions, class_session_id: int, scheme, host, div
 
         total_faces += len(all_face_data)
 
-        for face_data in all_face_data:
+        # Collect faces that need restoration in this image
+        faces_to_enhance = []
+        enhance_indices = []
+        face_crops = []
+        
+        for idx, face_data in enumerate(all_face_data):
             face_crop_array = (face_data['face'] * 255).astype(np.uint8)
             face_crop_bgr = cv2.cvtColor(face_crop_array, cv2.COLOR_RGB2BGR)
+            face_crops.append(face_crop_bgr)
             
+            facial_area = face_data['facial_area']
+            w, h = facial_area['w'], facial_area['h']
+            
+            gfpgan_min_face_size = getattr(settings, 'GFPGAN_MIN_FACE_SIZE', 80)
+            if w < gfpgan_min_face_size or h < gfpgan_min_face_size:
+                faces_to_enhance.append(face_crop_bgr)
+                enhance_indices.append(idx)
+                
+        # Perform batched enhancement on the GPU if restorer is available
+        _restorer = get_restorer()
+        gfpgan_enhance_weight = getattr(settings, 'GFPGAN_ENHANCE_WEIGHT', 0.6)
+        enhanced_faces = []
+        if faces_to_enhance and _restorer is not None:
+            enhanced_faces = enhance_faces_batched(_restorer, faces_to_enhance, weight=gfpgan_enhance_weight)
+            
+        # Map enhanced faces back to the list of face crops
+        enhanced_map = {}
+        if len(enhanced_faces) == len(enhance_indices):
+            enhanced_map = {enhance_indices[i]: enhanced_faces[i] for i in range(len(enhance_indices))}
+        else:
+            print(f"Warning: Batch restoration returned {len(enhanced_faces)} faces but expected {len(enhance_indices)}. Skipping enhancement mapping.")
+
+        for idx, face_data in enumerate(all_face_data):
+            face_crop_bgr = face_crops[idx]
             facial_area = face_data['facial_area']
             x, y, w, h = facial_area['x'], facial_area['y'], facial_area['w'], facial_area['h']
 
+            # Use enhanced face if available
+            face_to_scan = enhanced_map[idx] if idx in enhanced_map else face_crop_bgr
+            face_to_scan_rgb = cv2.cvtColor(face_to_scan, cv2.COLOR_BGR2RGB)
+
             # Read configurable settings
             face_rec_threshold = getattr(settings, 'FACE_RECOGNITION_THRESHOLD', 0.35)
-            gfpgan_enhance_weight = getattr(settings, 'GFPGAN_ENHANCE_WEIGHT', 0.6)
-            gfpgan_min_face_size = getattr(settings, 'GFPGAN_MIN_FACE_SIZE', 80)
-
-            # Preprocessing: Skip GFPGAN for large/high-fidelity faces
-            restored_list = []
-            if w < gfpgan_min_face_size or h < gfpgan_min_face_size:
-                _restorer = get_restorer()
-                if _restorer is not None:
-                    try:
-                        _, restored_list, _ = _restorer.enhance(
-                            face_crop_bgr,
-                            has_aligned=True, # Prevent restorer from doing double-alignment
-                            only_center_face=True,
-                            paste_back=False,
-                            weight=gfpgan_enhance_weight
-                        )
-                    except Exception:
-                        restored_list = []
-
-            face_to_scan = restored_list[0] if restored_list else face_crop_bgr
-
-            face_to_scan_rgb = cv2.cvtColor(face_to_scan, cv2.COLOR_BGR2RGB)
 
             try:
                 embedding_result = DeepFace.represent(
                     img_path=face_to_scan_rgb,
                     model_name='Facenet512',
-                    detector_backend='retinaface',
+                    detector_backend='skip',
                     enforce_detection=False,
                     align=False # Pre-aligned crop, avoid warp distortion
                 )
@@ -456,6 +552,13 @@ def evaluate_additional_attendance(class_session_id: int, new_photo_ids: list, s
         img_bgr = cv2.imread(image_path)
         if img_bgr is None:
             continue
+
+        # Resize image to a maximum dimension of 1600px to speed up CPU-bound face detection
+        max_dim = 1600
+        h, w = img_bgr.shape[:2]
+        if max(h, w) > max_dim:
+            scale = max_dim / max(h, w)
+            img_bgr = cv2.resize(img_bgr, (int(w * scale), int(h * scale)))
             
         try:
             all_face_data = DeepFace.extract_faces(
@@ -469,42 +572,55 @@ def evaluate_additional_attendance(class_session_id: int, new_photo_ids: list, s
             
         total_faces += len(all_face_data)
         
-        for face_data in all_face_data:
+        # Collect faces that need restoration in this image
+        faces_to_enhance = []
+        enhance_indices = []
+        face_crops = []
+        
+        for idx, face_data in enumerate(all_face_data):
             face_crop_array = (face_data['face'] * 255).astype(np.uint8)
             face_crop_bgr = cv2.cvtColor(face_crop_array, cv2.COLOR_RGB2BGR)
+            face_crops.append(face_crop_bgr)
             
             facial_area = face_data['facial_area']
-            x, y, w, h = facial_area['x'], facial_area['y'], facial_area['w'], facial_area['h']
+            w, h = facial_area['w'], facial_area['h']
             
+            gfpgan_min_face_size = getattr(settings, 'GFPGAN_MIN_FACE_SIZE', 80)
+            if w < gfpgan_min_face_size or h < gfpgan_min_face_size:
+                faces_to_enhance.append(face_crop_bgr)
+                enhance_indices.append(idx)
+                
+        # Perform batched enhancement on the GPU if restorer is available
+        _restorer = get_restorer()
+        gfpgan_enhance_weight = getattr(settings, 'GFPGAN_ENHANCE_WEIGHT', 0.6)
+        enhanced_faces = []
+        if faces_to_enhance and _restorer is not None:
+            enhanced_faces = enhance_faces_batched(_restorer, faces_to_enhance, weight=gfpgan_enhance_weight)
+            
+        # Map enhanced faces back to the list of face crops
+        enhanced_map = {}
+        if len(enhanced_faces) == len(enhance_indices):
+            enhanced_map = {enhance_indices[i]: enhanced_faces[i] for i in range(len(enhance_indices))}
+        else:
+            print(f"Warning: Batch restoration returned {len(enhanced_faces)} faces but expected {len(enhance_indices)}. Skipping enhancement mapping.")
+
+        for idx, face_data in enumerate(all_face_data):
+            face_crop_bgr = face_crops[idx]
+            facial_area = face_data['facial_area']
+            x, y, w, h = facial_area['x'], facial_area['y'], facial_area['w'], facial_area['h']
+
+            # Use enhanced face if available
+            face_to_scan = enhanced_map[idx] if idx in enhanced_map else face_crop_bgr
+            face_to_scan_rgb = cv2.cvtColor(face_to_scan, cv2.COLOR_BGR2RGB)
+
             # Read configurable settings
             face_rec_threshold = getattr(settings, 'FACE_RECOGNITION_THRESHOLD', 0.35)
-            gfpgan_enhance_weight = getattr(settings, 'GFPGAN_ENHANCE_WEIGHT', 0.6)
-            gfpgan_min_face_size = getattr(settings, 'GFPGAN_MIN_FACE_SIZE', 80)
 
-            # Preprocessing: Skip GFPGAN for large/high-fidelity faces
-            restored_list = []
-            if w < gfpgan_min_face_size or h < gfpgan_min_face_size:
-                _restorer = get_restorer()
-                if _restorer is not None:
-                    try:
-                        _, restored_list, _ = _restorer.enhance(
-                            face_crop_bgr,
-                            has_aligned=True, # Prevent restorer from doing double-alignment
-                            only_center_face=True,
-                            paste_back=False,
-                            weight=gfpgan_enhance_weight
-                        )
-                    except Exception:
-                        restored_list = []
-
-            face_to_scan = restored_list[0] if restored_list else face_crop_bgr
-            face_to_scan_rgb = cv2.cvtColor(face_to_scan, cv2.COLOR_BGR2RGB)
-            
             try:
                 embedding_result = DeepFace.represent(
                     img_path=face_to_scan_rgb,
                     model_name='Facenet512',
-                    detector_backend='retinaface',
+                    detector_backend='skip',
                     enforce_detection=False,
                     align=False # Pre-aligned crop, avoid warp distortion
                 )
