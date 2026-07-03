@@ -13,6 +13,7 @@ https://docs.djangoproject.com/en/5.1/ref/settings/
 from pathlib import Path
 import environ
 import os
+os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
 from urllib.parse import quote_plus
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -33,10 +34,11 @@ SECRET_KEY = env("SECRET_KEY")
 DEBUG = True
 
 ALLOWED_HOSTS = [
-    '10.52.71.247',
-    '172.26.13.17',
+    '172.24.12.74',
+    '10.175.223.247',
+    '172.24.13.237',
     '192.168.1.9',
-    '172.16.141.76',
+    '10.92.205.247',
     '172.25.13.31',
     '172.16.141.247',
     '172.26.12.236',
@@ -232,6 +234,15 @@ REST_FRAMEWORK = {
     ),
     'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
     'PAGE_SIZE': 100,
+    'DEFAULT_THROTTLE_CLASSES': [
+        'rest_framework.throttling.AnonRateThrottle',
+        'rest_framework.throttling.UserRateThrottle',
+    ],
+    'DEFAULT_THROTTLE_RATES': {
+        'anon': '60/minute',
+        'user': '120/minute',
+        'sensitive': '5/minute',
+    },
 }
 
 # JWT Configuration

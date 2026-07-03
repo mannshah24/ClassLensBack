@@ -8,6 +8,7 @@ try:
 except Exception:
     Image = None
 
+import math
 import numpy as np
 
 
@@ -29,12 +30,41 @@ def extract_face_embedding(photo):
         image = image.convert("RGB")
         img_arr = np.array(image)
 
-        image_embedding = DeepFace.represent(
-            img_path=img_arr,
-            model_name="Facenet512",
-            detector_backend="ssd",
-            enforce_detection=True,
-        )[0]["embedding"]
+        # Primary extraction using SSD backend
+        try:
+            image_embedding = DeepFace.represent(
+                img_path=img_arr,
+                model_name="Facenet512",
+                detector_backend="ssd",
+                enforce_detection=True,
+            )[0]["embedding"]
+
+            # Validate that the embedding is clean and has finite numbers
+            if not image_embedding or any(math.isnan(val) or math.isinf(val) for val in image_embedding):
+                raise ValueError("Embedding contains invalid NaN or non-finite values.")
+        except Exception:
+            # Fallback to OpenCV detector backend
+            try:
+                image_embedding = DeepFace.represent(
+                    img_path=img_arr,
+                    model_name="Facenet512",
+                    detector_backend="opencv",
+                    enforce_detection=True,
+                )[0]["embedding"]
+
+                # Validate fallback embedding
+                if not image_embedding or any(math.isnan(val) or math.isinf(val) for val in image_embedding):
+                    raise ValueError("Fallback embedding contains invalid NaN or non-finite values.")
+            except Exception as fallback_exc:
+                # Friendly instruction message for user
+                raise ValueError(
+                    "Face registration failed. Please ensure your photo:\n"
+                    "1. Has good lighting.\n"
+                    "2. You are looking directly at the camera.\n"
+                    "3. The image is clear and not blurry.\n"
+                    "4. Only one face is visible in the frame.\n"
+                    "Please try capturing or uploading a different photo."
+                ) from fallback_exc
 
         return [float(value) for value in image_embedding]
     except ValueError as exc:

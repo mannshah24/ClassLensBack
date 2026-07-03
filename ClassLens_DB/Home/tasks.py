@@ -237,7 +237,7 @@ def send_teacher_attendance_notification(teacher_token, is_success, subject_name
         except Exception as e:
             print(f"Failed to send notification to teacher: {e}")
 
-@shared_task
+@shared_task(acks_late=True, reject_on_worker_lost=True)
 def evaluate_attendance(total_sessions, class_session_id: int, scheme, host, division_id=None):
 
     session = ClassSession.objects.get(id=class_session_id)
@@ -336,6 +336,9 @@ def evaluate_attendance(total_sessions, class_session_id: int, scheme, host, div
                     align=False # Pre-aligned crop, avoid warp distortion
                 )
                 captured_embedding = embedding_result[0]['embedding']
+                import math
+                if not captured_embedding or any(math.isnan(val) or math.isinf(val) for val in captured_embedding):
+                    raise ValueError("Captured embedding contains invalid non-finite values.")
             except Exception:
                 if cv2 is not None:
                     try:
@@ -391,6 +394,8 @@ def evaluate_attendance(total_sessions, class_session_id: int, scheme, host, div
             
             student_notification_list.append((student_obj, is_present))
 
+    # Delete any duplicate records for this session in case of a celery task retry
+    AttendanceRecord.objects.filter(class_session=session).delete()
     AttendanceRecord.objects.bulk_create(records_to_create)
 
     # Sync cache percentages for all enrolled students
@@ -417,7 +422,7 @@ def evaluate_attendance(total_sessions, class_session_id: int, scheme, host, div
         "subject": session.subject.name
     }
 
-@shared_task
+@shared_task(acks_late=True, reject_on_worker_lost=True)
 def evaluate_additional_attendance(class_session_id: int, new_photo_ids: list, scheme, host, division_id=None):
     from .models import AttendancePhotos
     session = ClassSession.objects.get(id=class_session_id)
@@ -509,6 +514,9 @@ def evaluate_additional_attendance(class_session_id: int, new_photo_ids: list, s
                     align=False # Pre-aligned crop, avoid warp distortion
                 )
                 captured_embedding = embedding_result[0]['embedding']
+                import math
+                if not captured_embedding or any(math.isnan(val) or math.isinf(val) for val in captured_embedding):
+                    raise ValueError("Captured embedding contains invalid non-finite values.")
             except Exception:
                 if cv2 is not None:
                     try:
