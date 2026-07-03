@@ -38,6 +38,21 @@ from django.core.files.storage import default_storage
 from celery.result import AsyncResult
 from pgvector.django import CosineDistance
 from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.throttling import SimpleRateThrottle
+from rest_framework.decorators import throttle_classes
+
+class SensitiveRateThrottle(SimpleRateThrottle):
+    scope = 'sensitive'
+
+    def get_cache_key(self, request, view):
+        if request.user and request.user.is_authenticated:
+            ident = request.user.pk
+        else:
+            ident = self.get_ident(request)
+        return self.cache_format % {
+            'scope': self.scope,
+            'ident': ident
+        }
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -90,6 +105,7 @@ def registerNewTeacher(request, *args, **kwargs):
         )
 
 @api_view(["POST"])
+@throttle_classes([SensitiveRateThrottle])
 def validateStudent(request, *args, **kwargs):
     prn = request.data.get("prn")
     password = request.data.get("password")
@@ -143,6 +159,7 @@ def validateStudent(request, *args, **kwargs):
         )
 
 @api_view(["POST"])
+@throttle_classes([SensitiveRateThrottle])
 def validateTeacher(request, *args, **kwargs):
     email = request.data.get("email")
     password = request.data.get("password")
@@ -229,6 +246,7 @@ def get_subject_details(request, *args, **kwargs):
             )
 
 @api_view(["POST"])
+@throttle_classes([SensitiveRateThrottle])
 def send_otp(request, *args, **kwargs):
     try:
         import time
@@ -1283,6 +1301,21 @@ def get_student_dashboard(request, *args, **kwargs):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        if str(student_id) == '0':
+            return Response({
+                "student_name": "Guest",
+                "prn": "N/A",
+                "email": "",
+                "year": "N/A",
+                "department_name": None,
+                "division_id": None,
+                "division_name": None,
+                "semester": 1,
+                "overall_attendance": 0.0,
+                "subjects": [],
+                "recent_activity": [],
+            }, status=status.HTTP_200_OK)
+
         student = get_object_or_404(Student.objects.select_related('department', 'division'), id=student_id)
         
         enrollments = StudentEnrollment.objects.filter(student_prn=student.prn).select_related('subject')
@@ -1400,6 +1433,7 @@ def get_student_dashboard(request, *args, **kwargs):
         )
 
 @api_view(["POST"])
+@throttle_classes([])
 def update_notification_token(request, *args, **kwargs):
     """
     Updates the FCM notification token for a student.
@@ -1433,6 +1467,7 @@ def update_notification_token(request, *args, **kwargs):
 
 
 @api_view(["POST"])
+@throttle_classes([])
 def remove_notification_token(request, *args, **kwargs):
     """
     Removes the FCM notification token for a student (on logout).
@@ -1464,6 +1499,7 @@ def remove_notification_token(request, *args, **kwargs):
         )
     
 @api_view(["POST"])
+@throttle_classes([])
 def update_teacher_notification_token(request, *args, **kwargs):
     """
     Updates the FCM notification token for a teacher.
@@ -1497,6 +1533,7 @@ def update_teacher_notification_token(request, *args, **kwargs):
 
 
 @api_view(["POST"])
+@throttle_classes([])
 def remove_teacher_notification_token(request, *args, **kwargs):
     """
     Removes the FCM notification token for a teacher (on logout).
@@ -1659,6 +1696,13 @@ def get_daily_schedule(request):
 
     division_id = None
     if student_id:
+        if str(student_id) == '0':
+            return Response({
+                "is_holiday": False,
+                "holiday_name": None,
+                "message": "No classes scheduled.",
+                "sessions": []
+            }, status=status.HTTP_200_OK)
         try:
             student = Student.objects.get(id=student_id)
             division_id = student.division_id
@@ -1826,6 +1870,13 @@ def get_weekly_timetable(request):
     student_id = request.GET.get('student_id')
     if not student_id:
         return Response({"error": "student_id is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+    if str(student_id) == '0':
+        return Response({
+            "division_name": None,
+            "timetable": {},
+            "holidays": {}
+        }, status=status.HTTP_200_OK)
 
     try:
         student = Student.objects.get(id=student_id)
