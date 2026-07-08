@@ -11,6 +11,8 @@ import json
 import sys, types
 from django.db.models import F as DbF
 
+
+
 # Optional heavy dependencies — import lazily or fall back to None so management commands work without them
 try:
     import matplotlib.pyplot as plt
@@ -150,7 +152,7 @@ def enhance_faces_batched(restorer, face_crops, weight=0.6):
         with torch.no_grad():
             # GFPGAN forward pass
             outputs = restorer.gfpgan(batch_t, return_rgb=False, weight=weight)
-            
+
             # Convert output tensors back to numpy images
             for i in range(outputs.size(0)):
                 out_t = outputs[i]
@@ -158,7 +160,7 @@ def enhance_faces_batched(restorer, face_crops, weight=0.6):
                 out_t_cpu = out_t.cpu()
                 restored_face = tensor2img(out_t_cpu, rgb2bgr=True, min_max=(-1, 1))
                 restored_faces.append(restored_face.astype(np.uint8))
-                
+
         return restored_faces
     except Exception as e:
         print(f"Warning: Batched GFPGAN inference failed: {e}. Falling back to sequential enhancement.")
@@ -444,7 +446,7 @@ def evaluate_attendance(total_sessions, class_session_id: int, scheme, host, div
             best_prn = None
             
             for prn, known_emb in known_embeddings.items():
-                print(prn)
+                # print(prn)
                 distance = cosine(known_emb, captured_embedding)
                 if distance < best_score:
                     best_score = distance
@@ -454,7 +456,7 @@ def evaluate_attendance(total_sessions, class_session_id: int, scheme, host, div
                 present_student_prns.add(best_prn)
                 cv2.rectangle(img_bgr, (x, y), (x + w, y + h), (0, 255, 0), 2)
             else:
-                print(best_score)
+                # print(best_score)
                 cv2.rectangle(img_bgr, (x, y), (x + w, y + h), (0, 0, 255), 2)
 
         unique_id = uuid.uuid4()
@@ -515,6 +517,18 @@ def evaluate_attendance(total_sessions, class_session_id: int, scheme, host, div
 
 @shared_task
 def evaluate_additional_attendance(class_session_id: int, new_photo_ids: list, scheme, host, division_id=None):
+    import tensorflow as tf
+    import torch
+
+    print("="*60)
+    print("TensorFlow GPU :", tf.config.list_physical_devices("GPU"))
+    print("Torch CUDA     :", torch.cuda.is_available())
+
+    if torch.cuda.is_available():
+        print("Torch Device :", torch.cuda.get_device_name(0))
+
+    print("="*60)
+
     from .models import AttendancePhotos
     session = ClassSession.objects.get(id=class_session_id)
     new_images = AttendancePhotos.objects.filter(id__in=new_photo_ids)
@@ -637,7 +651,7 @@ def evaluate_additional_attendance(class_session_id: int, new_photo_ids: list, s
             best_prn = None
             
             for prn, known_emb in known_embeddings.items():
-                print(prn)
+                # print(prn)
                 distance = cosine(known_emb, captured_embedding)
                 if distance < best_score:
                     best_score = distance
@@ -647,7 +661,7 @@ def evaluate_additional_attendance(class_session_id: int, new_photo_ids: list, s
                 present_student_prns.add(best_prn)
                 cv2.rectangle(img_bgr, (x, y), (x + w, y + h), (0, 255, 0), 2)
             else:
-                print(best_score)
+                # print(best_score)
                 cv2.rectangle(img_bgr, (x, y), (x + w, y + h), (0, 0, 255), 2)
                 
         unique_id = uuid.uuid4()
@@ -980,4 +994,4 @@ def on_task_success(sender, result, **kwargs):
                     absent_count=result.get("absent_count", 0)
                 )
         except Exception as e:
-            print(f"Error in success signal handler: {e}")
+            print(f"Error in success signal handler: {e}")
