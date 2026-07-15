@@ -310,3 +310,110 @@ class PerformanceOptimizationTests(TestCase):
 		self.assertIsNotNone(self.student.password_hash)
 
 
+class ForgotPasswordTests(TestCase):
+	def setUp(self):
+		self.client = APIClient()
+		self.department = Department.objects.create(name="Computer Science & Engineering")
+		
+		# Create student with face embedding
+		self.student = Student.objects.create(
+			prn=1111222233,
+			name="Reset Student",
+			email="reset.student@example.com",
+			year=3,
+			department=self.department,
+			password_hash="somehashvalue",
+			face_embedding=[0.1] * 512
+		)
+		
+		# Create teacher
+		self.teacher = Teacher.objects.create(
+			name="Reset Teacher",
+			email="reset.teacher@msubaroda.ac.in",
+			department=self.department,
+			password_hash="teacherhash"
+		)
+
+	@patch("Home.views.send_otp_email_task.delay")
+	def test_forgot_password_student_flow(self, mock_send_email_delay):
+		cache.clear()
+		
+		# 1. Send OTP for student using PRN
+		response = self.client.post(
+			reverse("forgot_password_send_otp"),
+			{"prn": self.student.prn},
+			format="json"
+		)
+		self.assertEqual(response.status_code, 200)
+		self.assertEqual(response.data["email"], self.student.email)
+		mock_send_email_delay.assert_called_once()
+		
+		# Retrieve the generated OTP from cache
+		otp = cache.get(self.student.email)
+		self.assertIsNotNone(otp)
+		
+		# 2. Verify OTP for student
+		response = self.client.post(
+			reverse("forgot_password_verify_otp"),
+			{"prn": self.student.prn, "otp": otp},
+			format="json"
+		)
+		self.assertEqual(response.status_code, 200)
+		
+		# Assert password_hash is cleared, but face embedding remains intact
+		self.student.refresh_from_db()
+		self.assertIsNone(self.student.password_hash)
+		import numpy as np
+		self.assertTrue(np.allclose(self.student.face_embedding, [0.1] * 512))
+
+	@patch("Home.views.send_otp_email_task.delay")
+	def test_forgot_password_teacher_flow(self, mock_send_email_delay):
+		cache.clear()
+		
+		# 1. Send OTP for teacher using Email
+		response = self.client.post(
+			reverse("forgot_password_send_otp"),
+			{"email": self.teacher.email},
+			format="json"
+		)
+		self.assertEqual(response.status_code, 200)
+		mock_send_email_delay.assert_called_once()
+		
+		otp = cache.get(self.teacher.email)
+		self.assertIsNotNone(otp)
+		
+		# 2. Verify OTP with incorrect code (should fail)
+		response = self.client.post(
+			reverse("forgot_password_verify_otp"),
+			{"email": self.teacher.email, "otp": 9999},
+			format="json"
+		)
+		self.assertEqual(response.status_code, 400)
+		self.assertIsNotNone(self.teacher.password_hash)
+		
+		# 3. Verify OTP with correct code (should succeed)
+		response = self.client.post(
+			reverse("forgot_password_verify_otp"),
+			{"email": self.teacher.email, "otp": otp},
+			format="json"
+		)
+		self.assertEqual(response.status_code, 200)
+		
+		# Assert password_hash is cleared
+		self.teacher.refresh_from_db()
+		self.assertIsNone(self.teacher.password_hash)
+
+	def test_forgot_password_unregistered_rejection(self):
+		# Set student's password_hash to None
+		self.student.password_hash = None
+		self.student.save()
+		
+		response = self.client.post(
+			reverse("forgot_password_send_otp"),
+			{"prn": self.student.prn},
+			format="json"
+		)
+		self.assertEqual(response.status_code, 400)
+		self.assertIn("Account is not registered", response.data["detail"])
+
+
