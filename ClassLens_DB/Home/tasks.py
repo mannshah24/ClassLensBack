@@ -153,6 +153,10 @@ def enhance_faces_batched(restorer, face_crops, weight=0.6):
             # GFPGAN forward pass
             outputs = restorer.gfpgan(batch_t, return_rgb=False, weight=weight)
 
+            # Unpack outputs if it is a tuple (GFPGAN forward returns (restored_tensor, features))
+            if isinstance(outputs, tuple):
+                outputs = outputs[0]
+
             # Convert output tensors back to numpy images
             for i in range(outputs.size(0)):
                 out_t = outputs[i]
@@ -316,6 +320,97 @@ def send_teacher_attendance_notification(teacher_token, is_success, subject_name
         except Exception as e:
             print(f"Failed to send notification to teacher: {e}")
 
+def load_and_detect_faces(image_path, max_dim=2560):
+    from PIL import Image, ImageOps
+    import numpy as np
+    
+    # 1. Load image using PIL and apply EXIF transpose to rotate upright based on sensor metadata
+    try:
+        pil_img = Image.open(image_path)
+        pil_img = ImageOps.exif_transpose(pil_img)
+        # Convert PIL to BGR NumPy array for OpenCV compatibility
+        if pil_img.mode != "RGB":
+            pil_img = pil_img.convert("RGB")
+        img_bgr = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+    except Exception as e:
+        print(f"Error loading and transposing image {image_path}: {e}")
+        # Fallback to direct OpenCV load if PIL fails
+        img_bgr = cv2.imread(image_path)
+        if img_bgr is None:
+            return None, []
+
+    # 2. Fast Orientation Auto-Detection comparison using low-resolution (800px) scans
+    try:
+        h, w = img_bgr.shape[:2]
+        scale = 800.0 / max(h, w)
+        img_preview = cv2.resize(img_bgr, (int(w * scale), int(h * scale)))
+        
+        # Scan orientation 1: 0 degrees (current)
+        try:
+            faces_0 = DeepFace.extract_faces(
+                img_path=img_preview,
+                detector_backend='retinaface',
+                enforce_detection=True,
+                align=True
+            )
+        except Exception:
+            faces_0 = []
+            
+        # Scan orientation 2: 90 degrees clockwise (rotated)
+        img_preview_90 = cv2.rotate(img_preview, cv2.ROTATE_90_CLOCKWISE)
+        try:
+            faces_90 = DeepFace.extract_faces(
+                img_path=img_preview_90,
+                detector_backend='retinaface',
+                enforce_detection=True,
+                align=True
+            )
+        except Exception:
+            faces_90 = []
+            
+        print(f"Orientation comparison preview scan: 0° -> {len(faces_0)} faces, 90° CW -> {len(faces_90)} faces.")
+        
+        # If the 90-degree clockwise orientation detects strictly more faces, rotate original high-res image
+        if len(faces_90) > len(faces_0):
+            print("Winning orientation is 90° CW. Rotating original high-resolution image.")
+            img_bgr = cv2.rotate(img_bgr, cv2.ROTATE_90_CLOCKWISE)
+    except Exception as e:
+        print(f"Error during preview orientation detection: {e}")
+
+    # 3. Apply CLAHE contrast normalization to improve shadows / uneven lighting on winning orientation
+    try:
+        lab = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2LAB)
+        l_channel, a_channel, b_channel = cv2.split(lab)
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        cl_channel = clahe.apply(l_channel)
+        limg = cv2.merge((cl_channel, a_channel, b_channel))
+        processed_img = cv2.cvtColor(limg, cv2.COLOR_LAB2BGR)
+    except Exception as e:
+        print(f"Failed to apply CLAHE: {e}")
+        processed_img = img_bgr
+
+    # 4. Resize to final high-resolution max_dim (preserving aspect ratio)
+    h, w = processed_img.shape[:2]
+    if max(h, w) > max_dim:
+        scale = max_dim / max(h, w)
+        resized_img = cv2.resize(processed_img, (int(w * scale), int(h * scale)))
+    else:
+        resized_img = processed_img
+
+    # 5. Run final high-resolution face detection
+    try:
+        final_face_data = DeepFace.extract_faces(
+            img_path=resized_img,
+            detector_backend='retinaface',
+            enforce_detection=True,
+            align=True
+        )
+    except Exception:
+        final_face_data = []
+
+    return resized_img, final_face_data
+
+
 @shared_task
 def evaluate_attendance(total_sessions, class_session_id: int, scheme, host, division_id=None):
 
@@ -358,26 +453,9 @@ def evaluate_attendance(total_sessions, class_session_id: int, scheme, host, div
         if not os.path.exists(image_path):
             continue
 
-        img_bgr = cv2.imread(image_path)
+        img_bgr, all_face_data = load_and_detect_faces(image_path, max_dim=2560)
         if img_bgr is None:
             continue
-
-        # Resize image to a maximum dimension of 1600px to speed up CPU-bound face detection
-        max_dim = 1600
-        h, w = img_bgr.shape[:2]
-        if max(h, w) > max_dim:
-            scale = max_dim / max(h, w)
-            img_bgr = cv2.resize(img_bgr, (int(w * scale), int(h * scale)))
-
-        try:
-            all_face_data = DeepFace.extract_faces(
-                img_path=img_bgr,
-                detector_backend='retinaface',
-                enforce_detection=True,
-                align=True
-            )
-        except Exception:
-            all_face_data = []
 
         total_faces += len(all_face_data)
 
@@ -563,26 +641,9 @@ def evaluate_additional_attendance(class_session_id: int, new_photo_ids: list, s
         if not os.path.exists(image_path):
             continue
             
-        img_bgr = cv2.imread(image_path)
+        img_bgr, all_face_data = load_and_detect_faces(image_path, max_dim=2560)
         if img_bgr is None:
             continue
-
-        # Resize image to a maximum dimension of 1600px to speed up CPU-bound face detection
-        max_dim = 1600
-        h, w = img_bgr.shape[:2]
-        if max(h, w) > max_dim:
-            scale = max_dim / max(h, w)
-            img_bgr = cv2.resize(img_bgr, (int(w * scale), int(h * scale)))
-            
-        try:
-            all_face_data = DeepFace.extract_faces(
-                img_path=img_bgr,
-                detector_backend='retinaface',
-                enforce_detection=True,
-                align=True
-            )
-        except Exception:
-            all_face_data = []
             
         total_faces += len(all_face_data)
         
