@@ -20,6 +20,7 @@ staticfiles/
 .env.*
 venv/
 .venv/
+.venv_wsl/
 classlens-vnv/
 .classlens-env/
 env
