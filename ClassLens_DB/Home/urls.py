@@ -13,7 +13,7 @@ from Home.views import (
     student_bulk_upload, attendance_analytics, list_holidays,
     declare_holiday, delete_holiday, update_session_order,
     update_teacher_notification_token, remove_teacher_notification_token,
-    task_status
+    task_status, forgot_password_send_otp, forgot_password_verify_otp
 )
 
 from django.conf import settings
@@ -30,6 +30,8 @@ urlpatterns = [
     re_path(r"^sendOtp/?$", send_otp, name="send_otp"),
     re_path(r"^verifyOtp/?$", verify_otp, name="verify_otp"),
     re_path(r"^setPassword/?$", set_password, name="set_password"),
+    re_path(r"^forgotPassword/sendOtp/?$", forgot_password_send_otp, name="forgot_password_send_otp"),
+    re_path(r"^forgotPassword/verifyOtp/?$", forgot_password_verify_otp, name="forgot_password_verify_otp"),
     re_path(r"^getSubjectDetails/?$", get_subject_details, name="get_subject_details"),
     re_path(r"^verifyEmail/?$", verify_email, name="verify_email"),
     re_path(r"^students/attendance/?$", get_student_attendance, name="get_student_attendance"),

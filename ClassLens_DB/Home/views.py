@@ -2241,3 +2241,197 @@ def attendance_analytics(request):
     except Exception as e:
         traceback.print_exc()
         return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(["POST"])
+def forgot_password_send_otp(request, *args, **kwargs):
+    try:
+        import time
+        email = request.data.get("email")
+        prn = request.data.get("prn")
+
+        if not email and not prn:
+            return Response(
+                {"detail": "Email or PRN is required"}, status=status.HTTP_400_BAD_REQUEST
+            )
+
+        student = None
+        teacher = None
+
+        if prn:
+            try:
+                prn_val = int(prn)
+                student = Student.objects.filter(prn=prn_val).first()
+            except ValueError:
+                return Response(
+                    {"detail": "Invalid PRN format"}, status=status.HTTP_400_BAD_REQUEST
+                )
+            if not student:
+                return Response(
+                    {"detail": "No student found with this PRN"}, status=status.HTTP_404_NOT_FOUND
+                )
+            if student.password_hash is None or student.password_hash == "":
+                return Response(
+                    {"detail": "Account is not registered. Please sign up first."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            email = student.email
+        else:
+            teacher = Teacher.objects.filter(email=email).first()
+            if not teacher:
+                student = Student.objects.filter(email=email).first()
+            
+            if not (teacher or student):
+                return Response(
+                    {"detail": "No user found with this email"}, status=status.HTTP_404_NOT_FOUND
+                )
+            
+            user = teacher if teacher else student
+            if user.password_hash is None or user.password_hash == "":
+                return Response(
+                    {"detail": "Account is not registered. Please sign up first."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+        otp = random.randint(1000, 9999)
+
+        # Check OTP Cooldown
+        cooldown_key = f"otp_cooldown_{email}"
+        cooldown_expiry = cache.get(cooldown_key)
+        if cooldown_expiry is not None:
+            remaining = int(cooldown_expiry - time.time())
+            if remaining > 0:
+                return Response(
+                    {
+                        "detail": "Please wait before requesting a new OTP.",
+                        "cooldown_seconds": remaining
+                    },
+                    status=status.HTTP_429_TOO_MANY_REQUESTS
+                )
+
+        cache.set(email, otp, 600)
+
+        # Set randomized cooldown between 60 and 180 seconds
+        cooldown_seconds = random.randint(60, 180)
+        cache.set(cooldown_key, time.time() + cooldown_seconds, cooldown_seconds)
+
+        print('Forgot Password OTP:', otp)
+
+        display_name = teacher.name if teacher else student.name
+        subject = "Reset Your ClassLens Password"
+
+        plain_message = f"""
+        Hello,
+
+        Your One Time Password to reset your ClassLens password is: {otp}
+
+        This code is valid for 10 minutes. For your security, please do not share it with anyone.
+
+        Thank you,
+        The ClassLens Team
+        """
+        
+        html_message = f"""
+        <p>Hello {display_name},</p>
+        <p>Your One Time Password to reset your ClassLens password is: <strong>{otp}</strong></p>
+        <p>This code is valid for <strong>10 minutes</strong>. For your security, please do not share it with anyone.</p>
+        <br>
+        <p>Thank you,<br>
+        <strong>The ClassLens Team</strong></p>
+        """
+
+        try:
+            send_otp_email_task.delay(
+                email=email,
+                subject=subject,
+                plain_message=plain_message,
+                html_message=html_message,
+                from_email=settings.DEFAULT_FROM_EMAIL
+            )
+            return Response({
+                "message": "OTP sent successfully",
+                "email": email,
+                "cooldown_seconds": cooldown_seconds
+            }, status=200)
+        except Exception as email_error:
+            print(f"Email send task error: {email_error}")
+            return Response({"detail": "Failed to send OTP email"}, status=500)
+
+    except Exception as e:
+        traceback.print_exc()
+        return Response(
+            {"detail": f"An error occurred: {str(e)}"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+
+@api_view(["POST"])
+def forgot_password_verify_otp(request, *args, **kwargs):
+    try:
+        email = request.data.get("email")
+        prn = request.data.get("prn")
+        otp = request.data.get("otp")
+
+        if (not email and not prn) or otp is None:
+            return Response(
+                {"detail": "Email/PRN and OTP are required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        student = None
+        teacher = None
+
+        if prn:
+            try:
+                prn_val = int(prn)
+                student = Student.objects.filter(prn=prn_val).first()
+            except ValueError:
+                return Response(
+                    {"detail": "Invalid PRN format"}, status=status.HTTP_400_BAD_REQUEST
+                )
+            if not student:
+                return Response(
+                    {"detail": "No student found with this PRN"}, status=status.HTTP_404_NOT_FOUND
+                )
+            email = student.email
+        else:
+            teacher = Teacher.objects.filter(email=email).first()
+            if not teacher:
+                student = Student.objects.filter(email=email).first()
+
+            if not (teacher or student):
+                return Response(
+                    {"detail": "No user found"}, status=status.HTTP_404_NOT_FOUND
+                )
+
+        cached_otp = cache.get(email)
+
+        if cached_otp is None or cached_otp != int(otp):
+            return Response(
+                {"detail": "Invalid or expired OTP"}, status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Clear password hash (leaves student face embeddings intact)
+        if teacher:
+            teacher.password_hash = None
+            teacher.save(update_fields=['password_hash'])
+        elif student:
+            student.password_hash = None
+            student.save(update_fields=['password_hash'])
+
+        # Clean up cache
+        cache.delete(email)
+        cache.delete(f"otp_cooldown_{email}")
+
+        return Response({
+            "message": "OTP verified successfully. Password has been reset.",
+            "email": email,
+            "prn": student.prn if student else None
+        }, status=200)
+
+    except Exception as e:
+        traceback.print_exc()
+        return Response(
+            {"detail": f"An error occurred: {str(e)}"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
