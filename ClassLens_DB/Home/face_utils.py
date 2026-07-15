@@ -30,12 +30,12 @@ def extract_face_embedding(photo):
         image = image.convert("RGB")
         img_arr = np.array(image)
 
-        # Primary extraction using SSD backend
+        # Primary extraction using RetinaFace backend
         try:
             image_embedding = DeepFace.represent(
                 img_path=img_arr,
                 model_name="Facenet512",
-                detector_backend="ssd",
+                detector_backend="retinaface",
                 enforce_detection=True,
             )[0]["embedding"]
 
@@ -43,14 +43,24 @@ def extract_face_embedding(photo):
             if not image_embedding or any(math.isnan(val) or math.isinf(val) for val in image_embedding):
                 raise ValueError("Embedding contains invalid NaN or non-finite values.")
         except Exception:
-            # Fallback to OpenCV detector backend
+            # Fallback to SSD or OpenCV detector backend
             try:
-                image_embedding = DeepFace.represent(
-                    img_path=img_arr,
-                    model_name="Facenet512",
-                    detector_backend="opencv",
-                    enforce_detection=True,
-                )[0]["embedding"]
+                # Try SSD backend first
+                try:
+                    image_embedding = DeepFace.represent(
+                        img_path=img_arr,
+                        model_name="Facenet512",
+                        detector_backend="ssd",
+                        enforce_detection=True,
+                    )[0]["embedding"]
+                except Exception:
+                    # Try OpenCV backend
+                    image_embedding = DeepFace.represent(
+                        img_path=img_arr,
+                        model_name="Facenet512",
+                        detector_backend="opencv",
+                        enforce_detection=True,
+                    )[0]["embedding"]
 
                 # Validate fallback embedding
                 if not image_embedding or any(math.isnan(val) or math.isinf(val) for val in image_embedding):

@@ -269,7 +269,8 @@ class PerformanceOptimizationTests(TestCase):
 		self.assertEqual(len(response.data["subjects"]), 1)
 		self.assertEqual(response.data["student_name"], "Student E")
 
-	def test_send_otp_cooldown_jitter(self):
+	@patch("Home.views.send_otp_email_task.delay")
+	def test_send_otp_cooldown_jitter(self, mock_send_email_delay):
 		cache.clear()
 		# First request should succeed
 		response = self.client.post(reverse("send_otp"), {"email": self.student.email}, format="json")
@@ -279,7 +280,7 @@ class PerformanceOptimizationTests(TestCase):
 		response2 = self.client.post(reverse("send_otp"), {"email": self.student.email}, format="json")
 		self.assertEqual(response2.status_code, 429)
 		self.assertIn("cooldown_seconds", response2.data)
-		self.assertTrue(45 <= response2.data["cooldown_seconds"] <= 90)
+		self.assertTrue(60 <= response2.data["cooldown_seconds"] <= 180)
 
 	@patch("Home.tasks.process_student_face_embedding.delay")
 	def test_instant_registration(self, mock_delay):
