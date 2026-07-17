@@ -34,8 +34,9 @@ SECRET_KEY = env("SECRET_KEY")
 DEBUG = True
 
 ALLOWED_HOSTS = [
-    '172.24.12.74',
-    '10.175.223.247',
+    '172.26.12.236',
+    '192.168.1.11',
+    '10.78.77.247',
     '172.24.13.237',
     '10.156.74.76',
     '172.26.62.41',
@@ -83,6 +84,7 @@ MIDDLEWARE = [
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
+    "Home.middleware.DBLoggingMiddleware",
 ]
 
 CORS_ALLOW_ALL_ORIGINS = True

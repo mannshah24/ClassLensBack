@@ -202,44 +202,89 @@ def initialize_firebase():
         else:
             print(f"Warning: Firebase credentials not found at {cred_path}")
 
+# def send_attendance_notifications(student_records, subject_name, class_datetime):
+#     """
+#     Send push notifications to all students with valid FCM tokens.
+#     """
+#     initialize_firebase()
+    
+#     if not firebase_admin._apps:
+#         print("Firebase not initialized, skipping notifications")
+#         return
+    
+#     for student, is_present in student_records:
+#         if student.notification_token:
+#             try:
+#                 status_text = "Present ✓" if is_present else "Absent ✗"
+#                 message = messaging.Message(
+#                     notification=messaging.Notification(
+#                         title=f"Attendance Marked - {subject_name}",
+#                         body=f"You were marked {status_text} for the class on {class_datetime.strftime('%d %b %Y, %I:%M %p')}",
+#                     ),
+#                     data={
+#                         "type": "attendance",
+#                         "subject": subject_name,
+#                         "status": "present" if is_present else "absent",
+#                         "datetime": class_datetime.isoformat(),
+#                     },
+#                     android=messaging.AndroidConfig(
+#                         priority="high",
+#                         notification=messaging.AndroidNotification(
+#                             channel_id="attendance_channel",
+#                             default_sound=True,
+#                         ),
+#                     ),
+#                     token=student.notification_token,
+#                 )
+#                 response = messaging.send(message)
+#                 print(f"Notification sent to {student.name}: {response}")
+#             except Exception as e:
+#                 print(f"Failed to send notification to {student.name}: {e}")
+
 def send_attendance_notifications(student_records, subject_name, class_datetime):
-    """
-    Send push notifications to all students with valid FCM tokens.
-    """
     initialize_firebase()
-    
+
+    print("\n========== STUDENT NOTIFICATION DEBUG ==========")
+    print(f"Firebase apps initialized: {len(firebase_admin._apps) if firebase_admin else 0}")
+    print(f"Students to notify: {len(student_records)}")
+
     if not firebase_admin._apps:
-        print("Firebase not initialized, skipping notifications")
+        print("Firebase not initialized")
         return
-    
+
     for student, is_present in student_records:
+        print("--------------------------------")
+        print(f"Student: {student.name}")
+        print(f"PRN: {student.prn}")
+        print(f"Token: {student.notification_token}")
+        print("========== BACKEND TOKEN ==========")
+        print(student.notification_token)
+
         if student.notification_token:
             try:
                 status_text = "Present ✓" if is_present else "Absent ✗"
+
                 message = messaging.Message(
                     notification=messaging.Notification(
                         title=f"Attendance Marked - {subject_name}",
-                        body=f"You were marked {status_text} for the class on {class_datetime.strftime('%d %b %Y, %I:%M %p')}",
-                    ),
-                    data={
-                        "type": "attendance",
-                        "subject": subject_name,
-                        "status": "present" if is_present else "absent",
-                        "datetime": class_datetime.isoformat(),
-                    },
-                    android=messaging.AndroidConfig(
-                        priority="high",
-                        notification=messaging.AndroidNotification(
-                            channel_id="attendance_channel",
-                            default_sound=True,
-                        ),
+                        body=f"You were marked {status_text}",
                     ),
                     token=student.notification_token,
                 )
+
                 response = messaging.send(message)
-                print(f"Notification sent to {student.name}: {response}")
+
+                print("SUCCESS")
+                print(response)
+
             except Exception as e:
-                print(f"Failed to send notification to {student.name}: {e}")
+                print("FAILED")
+                print(type(e).__name__)
+                print(e)
+        else:
+            print("Student has no notification token")
+
+    print("========== END DEBUG ==========\n")
 
 def send_student_registration_notification(student, is_success, message_body):
     """
@@ -1064,3 +1109,104 @@ def on_task_success(sender, result, **kwargs):
                 )
         except Exception as e:
             print(f"Error in success signal handler: {e}")
+
+@shared_task(name="Home.tasks.log_normal_task")
+def log_normal_task(module, action, actor_id=None, actor_email=None, request_path="", ip_address=None, summary=""):
+    from django.db import connection
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            INSERT INTO classlens_normal_log 
+            (timestamp, module, action, actor_id, actor_email, request_path, ip_address, summary)
+            VALUES (CURRENT_TIMESTAMP, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            [module, action, actor_id, actor_email, request_path, ip_address, summary]
+        )
+
+@shared_task(name="Home.tasks.log_error_task")
+def log_error_task(module, error_type, error_message, traceback_str, request_payload=None, actor_id=None):
+    from django.db import connection
+    import json
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            INSERT INTO classlens_error_log
+            (timestamp, module, error_type, error_message, traceback, request_payload, actor_id)
+            VALUES (CURRENT_TIMESTAMP, %s, %s, %s, %s, %s, %s)
+            """,
+            [module, error_type, error_message, traceback_str, json.dumps(request_payload) if request_payload else None, actor_id]
+        )
+
+@shared_task(name="Home.tasks.cleanup_old_logs")
+def cleanup_old_logs(days_to_keep=180):
+    from django.db import connection
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "DELETE FROM classlens_normal_log WHERE timestamp < NOW() - %s * INTERVAL '1 day'",
+            [days_to_keep]
+        )
+        cursor.execute(
+            "DELETE FROM classlens_error_log WHERE timestamp < NOW() - %s * INTERVAL '1 day'",
+            [days_to_keep]
+        )
+
+from celery.signals import task_postrun
+
+@task_postrun.connect
+def on_task_postrun(sender, task_id, task, args, kwargs, retval, state, **extra_kwargs):
+    if sender.name in ['Home.tasks.log_normal_task', 'Home.tasks.log_error_task', 'Home.tasks.cleanup_old_logs']:
+        return
+
+    from Home.db_logger import log_normal, log_error
+    import traceback
+
+    module = 'celery_worker'
+    action = f"TASK_{sender.name.upper()}"
+    
+    actor_id = None
+    for key in ['actor_id', 'user_id', 'student_id', 'teacher_id']:
+        if key in kwargs:
+            actor_id = kwargs[key]
+            break
+
+    if state == 'SUCCESS':
+        summary = f"Celery task {sender.name} [{task_id}] succeeded."
+        log_normal(
+            module=module,
+            action=action,
+            actor_id=actor_id,
+            actor_email=None,
+            request_path=f"celery://tasks/{sender.name}",
+            ip_address="127.0.0.1",
+            summary=summary
+        )
+    else:
+        error_message = str(retval) if retval else "Task failed"
+        error_type = "CeleryTaskError"
+        tb_str = ""
+        
+        if 'exception' in extra_kwargs:
+            exc = extra_kwargs['exception']
+            error_type = exc.__class__.__name__
+            error_message = str(exc)
+        
+        if 'traceback' in extra_kwargs:
+            tb_str = str(extra_kwargs['traceback'])
+        elif hasattr(retval, 'traceback'):
+            tb_str = str(retval.traceback)
+            
+        payload = {
+            "task_id": task_id,
+            "args": [str(a) for a in args],
+            "kwargs": {k: str(v) for k, v in kwargs.items()}
+        }
+        
+        log_error(
+            module=module,
+            error_type=error_type,
+            error_message=error_message,
+            traceback_str=tb_str or traceback.format_exc(),
+            request_payload=payload,
+            actor_id=actor_id
+        )
+
