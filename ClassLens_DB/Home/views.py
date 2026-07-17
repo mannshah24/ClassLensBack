@@ -133,6 +133,7 @@ def validateStudent(request, *args, **kwargs):
         else:
             # Issue a simple JWT-like token so frontend can authenticate subsequent requests
             refresh = RefreshToken()
+            refresh['user_id'] = student.id
             refresh['student_id'] = student.id
             refresh['prn'] = student.prn
 
@@ -181,8 +182,17 @@ def validateTeacher(request, *args, **kwargs):
                 {"detail": "Invalid password"}, status=status.HTTP_400_BAD_REQUEST
             )
         else:
+            refresh = RefreshToken()
+            refresh['user_id'] = teacher.id
+            refresh['teacher_id'] = teacher.id
+            refresh['email'] = teacher.email
             return Response(
-                {"message": "Teacher validated successfully", "teacher_id": teacher.id, 'teacher_name': teacher.name},
+                {
+                    "message": "Teacher validated successfully",
+                    "teacher_id": teacher.id,
+                    "teacher_name": teacher.name,
+                    "token": str(refresh.access_token)
+                },
                 status=status.HTTP_200_OK,
             )
     except Teacher.DoesNotExist:
@@ -2476,6 +2486,81 @@ def forgot_password_verify_otp(request, *args, **kwargs):
             "token": reset_token
         }, status=200)
 
+    except Exception as e:
+        traceback.print_exc()
+        return Response(
+            {"detail": f"An error occurred: {str(e)}"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+from django.db import connection
+from django.utils import timezone
+import openpyxl
+from django.http import HttpResponse
+
+def execute_raw_sql_log(module, action, summary, request):
+    try:
+        actor_id = request.user.id if request.user and request.user.is_authenticated else None
+        actor_email = getattr(request.user, 'email', None) if request.user and request.user.is_authenticated else None
+        request_path = request.path
+        
+        x_forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR')
+        if x_forwarded_for:
+            ip_address = x_forwarded_for.split(',')[0].strip()
+        else:
+            ip_address = request.META.get('REMOTE_ADDR')
+            
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "INSERT INTO classlens_normal_log (timestamp, module, action, actor_id, actor_email, request_path, ip_address, summary) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+                [timezone.now(), module, action, actor_id, actor_email, request_path, ip_address, summary]
+            )
+    except Exception as log_err:
+        print(f"Logging error: {log_err}")
+
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def export_subject_attendance(request, subject_id):
+    try:
+        # Fetch enrolled student PRNs from StudentEnrollment
+        enrolled_prns = StudentEnrollment.objects.filter(subject_id=subject_id).values_list('student_prn', flat=True)
+
+        # Get Student records and annotate them with real total and attended counts from AttendanceRecord
+        students_stats = Student.objects.filter(prn__in=enrolled_prns).annotate(
+            total_classes=Count(
+                'attendancerecord',
+                filter=Q(attendancerecord__class_session__subject_id=subject_id)
+            ),
+            present_count=Count(
+                'attendancerecord',
+                filter=Q(attendancerecord__class_session__subject_id=subject_id, attendancerecord__status=True)
+            )
+        ).order_by('name')
+
+        if not students_stats.exists():
+            return HttpResponse("No attendance data found.", status=400)
+
+        # Generate Excel Structure
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Attendance"
+        ws.append(["PRN", "Name", "Total Sessions", "Present", "Percentage"])
+        
+        for s in students_stats:
+            total = s.total_classes
+            present = s.present_count
+            percentage = (present / total) * 100.0 if total > 0 else 0.0
+            ws.append([s.prn, s.name, total, present, f"{percentage:.2f}%"])
+            
+        response = HttpResponse(content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        response['Content-Disposition'] = f'attachment; filename="Attendance_Subject_{subject_id}.xlsx"'
+        wb.save(response)
+        
+        # Fast raw logging insert (index-less, PK-less heap table execution)
+        execute_raw_sql_log(module="attendance_api", action="EXPORT", summary=f"Exported subject {subject_id}", request=request)
+        
+        return response
     except Exception as e:
         traceback.print_exc()
         return Response(
