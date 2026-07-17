@@ -2,6 +2,9 @@ from django.test import TestCase
 from django.urls import reverse
 from django.utils import timezone
 from rest_framework.test import APIClient
+from django.core.cache import cache
+from django.contrib.auth.hashers import make_password, check_password
+from unittest.mock import patch
 
 from .models import (
 	AttendanceRecord,
@@ -315,23 +318,23 @@ class ForgotPasswordTests(TestCase):
 		self.client = APIClient()
 		self.department = Department.objects.create(name="Computer Science & Engineering")
 		
-		# Create student with face embedding
+		# Create student with face embedding (pre-hashed password)
 		self.student = Student.objects.create(
 			prn=1111222233,
 			name="Reset Student",
 			email="reset.student@example.com",
 			year=3,
 			department=self.department,
-			password_hash="somehashvalue",
+			password_hash=make_password("oldpassword123"),
 			face_embedding=[0.1] * 512
 		)
 		
-		# Create teacher
+		# Create teacher (pre-hashed password)
 		self.teacher = Teacher.objects.create(
 			name="Reset Teacher",
 			email="reset.teacher@msubaroda.ac.in",
 			department=self.department,
-			password_hash="teacherhash"
+			password_hash=make_password("teacherold123")
 		)
 
 	@patch("Home.views.send_otp_email_task.delay")
@@ -352,19 +355,33 @@ class ForgotPasswordTests(TestCase):
 		otp = cache.get(self.student.email)
 		self.assertIsNotNone(otp)
 		
-		# 2. Verify OTP for student
+		# 2. Verify OTP for student (returns token)
 		response = self.client.post(
 			reverse("forgot_password_verify_otp"),
 			{"prn": self.student.prn, "otp": otp},
 			format="json"
 		)
 		self.assertEqual(response.status_code, 200)
+		token = response.data.get("token")
+		self.assertIsNotNone(token)
 		
-		# Assert password_hash is cleared, but face embedding remains intact
+		# Assert password_hash is NOT cleared, and face embedding remains intact
 		self.student.refresh_from_db()
-		self.assertIsNone(self.student.password_hash)
+		self.assertIsNotNone(self.student.password_hash)
 		import numpy as np
 		self.assertTrue(np.allclose(self.student.face_embedding, [0.1] * 512))
+
+		# 3. Reset password using the correct token
+		response = self.client.post(
+			reverse("set_password"),
+			{"prn": self.student.prn, "password": "newpassword123", "token": token},
+			format="json"
+		)
+		self.assertEqual(response.status_code, 200)
+		
+		# Verify password changed successfully
+		self.student.refresh_from_db()
+		self.assertTrue(check_password("newpassword123", self.student.password_hash))
 
 	@patch("Home.views.send_otp_email_task.delay")
 	def test_forgot_password_teacher_flow(self, mock_send_email_delay):
@@ -389,7 +406,6 @@ class ForgotPasswordTests(TestCase):
 			format="json"
 		)
 		self.assertEqual(response.status_code, 400)
-		self.assertIsNotNone(self.teacher.password_hash)
 		
 		# 3. Verify OTP with correct code (should succeed)
 		response = self.client.post(
@@ -398,10 +414,24 @@ class ForgotPasswordTests(TestCase):
 			format="json"
 		)
 		self.assertEqual(response.status_code, 200)
+		token = response.data.get("token")
+		self.assertIsNotNone(token)
 		
-		# Assert password_hash is cleared
+		# Assert password_hash is NOT cleared
 		self.teacher.refresh_from_db()
-		self.assertIsNone(self.teacher.password_hash)
+		self.assertIsNotNone(self.teacher.password_hash)
+
+		# 4. Reset password using the correct token
+		response = self.client.post(
+			reverse("set_password"),
+			{"email": self.teacher.email, "password": "teachernew123", "token": token},
+			format="json"
+		)
+		self.assertEqual(response.status_code, 200)
+		
+		# Verify password changed
+		self.teacher.refresh_from_db()
+		self.assertTrue(check_password("teachernew123", self.teacher.password_hash))
 
 	def test_forgot_password_unregistered_rejection(self):
 		# Set student's password_hash to None
@@ -415,5 +445,36 @@ class ForgotPasswordTests(TestCase):
 		)
 		self.assertEqual(response.status_code, 400)
 		self.assertIn("Account is not registered", response.data["detail"])
+
+	@patch("Home.views.send_otp_email_task.delay")
+	def test_reset_password_same_as_current_rejected(self, mock_send_email_delay):
+		cache.clear()
+		# Get token for student
+		self.client.post(reverse("forgot_password_send_otp"), {"prn": self.student.prn}, format="json")
+		otp = cache.get(self.student.email)
+		response = self.client.post(reverse("forgot_password_verify_otp"), {"prn": self.student.prn, "otp": otp}, format="json")
+		token = response.data["token"]
+		
+		# Reset to the exact same password ("oldpassword123")
+		response = self.client.post(
+			reverse("set_password"),
+			{"prn": self.student.prn, "password": "oldpassword123", "token": token},
+			format="json"
+		)
+		# Should return 400 Bad Request
+		self.assertEqual(response.status_code, 400)
+		self.assertIn("You cannot reset a password with the last used password", response.data["detail"])
+
+	def test_reset_password_unauthorized_rejection(self):
+		cache.clear()
+		# Try to set password without obtaining a verification token
+		response = self.client.post(
+			reverse("set_password"),
+			{"email": self.teacher.email, "password": "newpassword123", "token": "sometoken123"},
+			format="json"
+		)
+		# Should return 403 Forbidden
+		self.assertEqual(response.status_code, 403)
+		self.assertIn("Invalid or expired reset token", response.data["detail"])
 
 

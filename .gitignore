@@ -30,7 +30,7 @@ ClassLens_DB/CodeFormer/
 # Migrations (optional — keep if you want to track them)
 **/migrations/__pycache__/
 # Uncomment below to ignore all migrations
-**/migrations/*.py
+# **/migrations/*.py
 
 # VS Code
 .vscode/

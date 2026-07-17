@@ -469,7 +469,7 @@ def save_uploaded_photo_temp(photo):
             
     return temp_path
 
-def _update_student_password(prn, password, photo):
+def _update_student_password(prn, password, photo, token=None):
     if prn is None or password is None:
         return Response(
             {"detail": "PRN and Password are required"},
@@ -483,9 +483,35 @@ def _update_student_password(prn, password, photo):
             status=status.HTTP_404_NOT_FOUND,
         )
 
-    # Hash and save password synchronously immediately
-    student.password_hash = make_password(password)
-    student.save()
+    # If photo is None, this is a forgot-password reset flow
+    if photo is None:
+        if token is None:
+            return Response(
+                {"detail": "Token is required for password reset"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        cached_token = cache.get(f"reset_verified_prn_{prn}")
+        if not cached_token or cached_token != token:
+            return Response(
+                {"detail": "Invalid or expired reset token. Please verify OTP again."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        
+        if student.password_hash and check_password(password, student.password_hash):
+            return Response(
+                {"detail": "You cannot reset a password with the last used password."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+    # Hash and save password synchronously immediately within an atomic transaction
+    from django.db import transaction
+    with transaction.atomic():
+        student.password_hash = make_password(password)
+        student.save()
+
+    # Clear cache flag if it was a reset flow
+    if photo is None:
+        cache.delete(f"reset_verified_prn_{prn}")
 
     if photo is not None:
         try:
@@ -514,39 +540,58 @@ def _update_student_password(prn, password, photo):
 def set_password(request, *args, **kwargs):
     try:
         password = request.data.get("password")
+        token = request.data.get("token")
         if request.data.get("email"):
-            email=request.data.get("email")
-            if email is None or password is None:
+            email = request.data.get("email")
+            if email is None or password is None or token is None:
                 return Response(
-                    {"detail": "Email and Password are required"},
+                    {"detail": "Email, Password, and Token are required"},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
+
+            cached_token = cache.get(f"reset_verified_email_{email}")
+            if not cached_token or cached_token != token:
+                return Response(
+                    {"detail": "Invalid or expired reset token. Please verify OTP again."},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+
             teacher = Teacher.objects.filter(email=email).first()
-            if teacher : 
-                teacher.password_hash = make_password(password)
-                teacher.save()
-                print(f"✓ Teacher password set successfully for {email}")
+            if teacher:
+                if teacher.password_hash and check_password(password, teacher.password_hash):
+                    return Response(
+                        {"detail": "You cannot reset a password with the last used password."},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+
+                from django.db import transaction
+                with transaction.atomic():
+                    teacher.password_hash = make_password(password)
+                    teacher.save()
+
+                cache.delete(f"reset_verified_email_{email}")
+                print(f"[SUCCESS] Teacher password set successfully for {email}")
                 print(f"  Hash (first 20 chars): {teacher.password_hash[:20]}...")
                 
                 # Verify it was saved to DB
                 verify = Teacher.objects.get(email=email)
                 if verify.password_hash:
-                    print(f"✓ Verified: Password hash persisted in database")
+                    print(f"[SUCCESS] Verified: Password hash persisted in database")
                     return Response({"message": "Teacher password set successfully"}, status=200)
                 else:
-                    print(f"✗ ERROR: Password hash is None after save!")
+                    print(f"[ERROR] Password hash is None after save!")
                     return Response({"detail": "Failed to persist password"}, status=500)
-            else : 
+            else:
                 return Response({"detail": "No Teacher found with this email"}, status=status.HTTP_404_NOT_FOUND)
         
         elif request.data.get("prn"):
             prn = request.data.get("prn")
             photo = request.FILES.get("photo")
-            return _update_student_password(prn, password, photo)
-
+            return _update_student_password(prn, password, photo, token)
+ 
     except Exception as e:
         traceback.print_exc()
-        print(f"✗ Exception in set_password: {str(e)}")
+        print(f"[ERROR] Exception in set_password: {str(e)}")
         return Response(
             {"detail": f"An error occurred while updating the password: {str(e)}"},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -2411,22 +2456,24 @@ def forgot_password_verify_otp(request, *args, **kwargs):
                 {"detail": "Invalid or expired OTP"}, status=status.HTTP_400_BAD_REQUEST
             )
 
-        # Clear password hash (leaves student face embeddings intact)
-        if teacher:
-            teacher.password_hash = None
-            teacher.save(update_fields=['password_hash'])
-        elif student:
-            student.password_hash = None
-            student.save(update_fields=['password_hash'])
+        import secrets
+        reset_token = secrets.token_urlsafe(32)
 
-        # Clean up cache
+        # Save token to cache (valid for 10 minutes)
+        if teacher:
+            cache.set(f"reset_verified_email_{email}", reset_token, 600)
+        elif student:
+            cache.set(f"reset_verified_prn_{student.prn}", reset_token, 600)
+
+        # Clean up OTP cache
         cache.delete(email)
         cache.delete(f"otp_cooldown_{email}")
 
         return Response({
-            "message": "OTP verified successfully. Password has been reset.",
+            "message": "OTP verified successfully. You can now reset your password.",
             "email": email,
-            "prn": student.prn if student else None
+            "prn": student.prn if student else None,
+            "token": reset_token
         }, status=200)
 
     except Exception as e:
