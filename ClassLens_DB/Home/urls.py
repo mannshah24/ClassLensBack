@@ -13,7 +13,8 @@ from Home.views import (
     student_bulk_upload, attendance_analytics, list_holidays,
     declare_holiday, delete_holiday, update_session_order,
     update_teacher_notification_token, remove_teacher_notification_token,
-    task_status, forgot_password_send_otp, forgot_password_verify_otp
+    task_status, forgot_password_send_otp, forgot_password_verify_otp,
+    export_subject_attendance
 )
 
 from django.conf import settings
@@ -87,6 +88,11 @@ urlpatterns = [
     re_path(r"^teacher/notification-token/?$", update_teacher_notification_token, name="update_teacher_notification_token"),
     re_path(r"^teacher/notification-token/remove/?$", remove_teacher_notification_token, name="remove_teacher_notification_token"),
     re_path(r"^taskStatus/(?P<task_id>[^/]+)/?$", task_status, name="task_status"),
+    re_path(
+        r"^subjects/(?P<subject_id>\d+)/export/?$",
+        export_subject_attendance,
+        name="export_subject_attendance",
+    ),
 ]
 
 

@@ -35,7 +35,7 @@ DEBUG = True
 
 ALLOWED_HOSTS = [
     '10.78.77.232',
-    '172.24.12.74',
+    '172.26.12.236',
     '10.175.223.247',
     '172.24.13.237',
     '10.156.74.76',
@@ -234,8 +234,7 @@ DEFAULT_FROM_EMAIL = env('EMAIL_HOST_USER')
 # Django REST Framework Configuration
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (
-        'Home.authentication.CustomAdminAuthentication',
-        'rest_framework_simplejwt.authentication.JWTAuthentication',
+        'Home.authentication.ClassLensJWTAuthentication',
     ),
     'DEFAULT_PERMISSION_CLASSES': (
         'rest_framework.permissions.AllowAny',

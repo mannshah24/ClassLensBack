@@ -19,6 +19,18 @@ class Teacher(models.Model):
     notification_token = models.TextField(null=True, blank=True)
     def __str__(self):
         return self.name
+
+    @property
+    def is_authenticated(self):
+        return True
+
+    @property
+    def is_anonymous(self):
+        return False
+
+    @property
+    def is_active(self):
+        return True
     
 class Student(models.Model):
     prn = models.BigIntegerField(unique=True, null=False)
@@ -40,6 +52,18 @@ class Student(models.Model):
     notification_token = models.TextField(null=True, blank=True)
     def __str__(self):
         return f"{self.name} ({self.prn})"
+
+    @property
+    def is_authenticated(self):
+        return True
+
+    @property
+    def is_anonymous(self):
+        return False
+
+    @property
+    def is_active(self):
+        return True
     
 class Subject(models.Model):
     code = models.TextField(unique=True, null=False,default="")
