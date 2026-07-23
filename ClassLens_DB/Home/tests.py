@@ -478,3 +478,168 @@ class ForgotPasswordTests(TestCase):
 		self.assertIn("Invalid or expired reset token", response.data["detail"])
 
 
+from django.db import connection
+from Home.db_logger import log_normal, log_error
+from unittest.mock import patch
+
+class DatabaseLoggingTests(TestCase):
+	def setUp(self):
+		self.client = APIClient()
+		self.department = Department.objects.create(name="Engineering")
+		with connection.cursor() as cursor:
+			cursor.execute("DELETE FROM classlens_normal_log;")
+			cursor.execute("DELETE FROM classlens_error_log;")
+
+	def test_log_normal_inserts_successfully(self):
+		with patch('Home.tasks.log_normal_task.delay') as mock_delay:
+			from Home.db_logger import log_normal_sync
+			log_normal_sync(
+				module="test_module",
+				action="TEST_ACTION",
+				actor_id=123,
+				actor_email="actor@example.com",
+				request_path="/api/test/",
+				ip_address="127.0.0.1",
+				summary="Test summary message"
+			)
+			
+			with connection.cursor() as cursor:
+				cursor.execute("SELECT * FROM classlens_normal_log;")
+				rows = cursor.fetchall()
+				
+			self.assertEqual(len(rows), 1)
+			row = rows[0]
+			self.assertEqual(row[1], "test_module")
+			self.assertEqual(row[2], "TEST_ACTION")
+			self.assertEqual(row[3], 123)
+			self.assertEqual(row[4], "actor@example.com")
+			self.assertEqual(row[5], "/api/test/")
+			self.assertEqual(row[6], "127.0.0.1")
+			self.assertEqual(row[7], "Test summary message")
+
+	def test_log_error_inserts_successfully(self):
+		from Home.db_logger import log_error_sync
+		log_error_sync(
+			module="test_error_module",
+			error_type="ValueError",
+			error_message="Test error occurred",
+			traceback_str="File test.py, line 5, in test",
+			request_payload={"key": "val"},
+			actor_id=456
+		)
+		
+		with connection.cursor() as cursor:
+			cursor.execute("SELECT * FROM classlens_error_log;")
+			rows = cursor.fetchall()
+			
+		self.assertEqual(len(rows), 1)
+		row = rows[0]
+		self.assertEqual(row[1], "test_error_module")
+		self.assertEqual(row[2], "ValueError")
+		self.assertEqual(row[3], "Test error occurred")
+		self.assertEqual(row[4], "File test.py, line 5, in test")
+		self.assertEqual(row[5], {"key": "val"})
+		self.assertEqual(row[6], 456)
+
+	def test_middleware_logs_state_changing_success(self):
+		import random
+		email = f"teacher.{random.randint(1000, 9999)}@example.com"
+		
+		response = self.client.post(
+			reverse("register_new_teacher"),
+			{
+				"name": "New Test Teacher",
+				"email": email,
+				"password": "securepassword",
+				"departmentID": self.department.id
+			},
+			format="json"
+		)
+		self.assertEqual(response.status_code, 201)
+		
+		with connection.cursor() as cursor:
+			cursor.execute("SELECT * FROM classlens_normal_log;")
+			rows = cursor.fetchall()
+			
+		self.assertEqual(len(rows), 1)
+		self.assertEqual(rows[0][1], "register_new_teacher")
+		self.assertEqual(rows[0][2], "POST_REGISTER_NEW_TEACHER")
+
+	def test_middleware_logs_view_exceptions_to_error_log(self):
+		with patch('Home.views.Department.objects.all') as mock_all:
+			mock_all.side_effect = RuntimeError("Simulated Database Failure")
+			
+			with self.assertRaises(RuntimeError):
+				self.client.get(reverse("get_departments"))
+				
+		with connection.cursor() as cursor:
+			cursor.execute("SELECT * FROM classlens_error_log;")
+			rows = cursor.fetchall()
+			
+		self.assertEqual(len(rows), 1)
+		self.assertEqual(rows[0][1], "get_departments")
+		self.assertEqual(rows[0][2], "RuntimeError")
+		self.assertEqual(rows[0][3], "Simulated Database Failure")
+		self.assertIn("RuntimeError: Simulated Database Failure", rows[0][4])
+
+	def test_handled_exceptions_using_print_exc_are_logged(self):
+		with patch('Home.views.get_object_or_404') as mock_get:
+			mock_get.side_effect = RuntimeError("Simulated Registration Failure")
+			
+			response = self.client.post(
+				reverse("register_new_teacher"),
+				{
+					"name": "New Test Teacher",
+					"email": "teacher.failed@example.com",
+					"password": "securepassword",
+					"departmentID": 9999
+				},
+				format="json"
+			)
+			self.assertEqual(response.status_code, 500)
+			
+		with connection.cursor() as cursor:
+			cursor.execute("SELECT * FROM classlens_error_log;")
+			rows = cursor.fetchall()
+			
+		self.assertEqual(len(rows), 1)
+		self.assertEqual(rows[0][1], "register_new_teacher")
+		self.assertEqual(rows[0][2], "RuntimeError")
+		self.assertEqual(rows[0][3], "Simulated Registration Failure")
+		self.assertIn("RuntimeError: Simulated Registration Failure", rows[0][4])
+
+	def test_get_actor_info_resolves_from_query_params_or_body(self):
+		teacher = Teacher.objects.create(
+			name="Teacher Actor Test",
+			email="actor.test@example.com",
+			department=self.department
+		)
+		
+		import random
+		email = f"teacher.{random.randint(1000, 9999)}@example.com"
+		
+		response = self.client.post(
+			reverse("register_new_teacher"),
+			{
+				"name": "New Test Teacher",
+				"email": email,
+				"password": "securepassword",
+				"departmentID": self.department.id,
+				"teacherID": teacher.id
+			},
+			format="json"
+		)
+		self.assertEqual(response.status_code, 201)
+		
+		with connection.cursor() as cursor:
+			cursor.execute("SELECT * FROM classlens_normal_log;")
+			rows = cursor.fetchall()
+			
+		self.assertEqual(len(rows), 1)
+		self.assertEqual(rows[0][3], teacher.id)
+		self.assertEqual(rows[0][4], "actor.test@example.com")
+
+
+
+
+
