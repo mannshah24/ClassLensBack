@@ -45,6 +45,8 @@ ALLOWED_HOSTS = [
     '10.52.71.247',
     '172.26.13.17',
     '192.168.1.9',
+    '192.168.1.48',
+    '*',
     '10.92.205.247',
     '172.25.13.31',
     '172.16.141.247',
@@ -163,7 +165,7 @@ AUTH_PASSWORD_VALIDATORS = [
 
 LANGUAGE_CODE = "en-us"
 
-TIME_ZONE = "UTC"
+TIME_ZONE = "Asia/Kolkata"
 
 USE_I18N = True
 

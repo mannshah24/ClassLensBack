@@ -16,6 +16,7 @@ import random
 from datetime import datetime, date
 from django.core.cache import cache
 from django.core.mail import send_mail
+from pathlib import Path
 from django.conf import settings
 from django.utils import timezone
 import environ
@@ -40,6 +41,18 @@ from pgvector.django import CosineDistance
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.throttling import SimpleRateThrottle
 from rest_framework.decorators import throttle_classes
+import pytz
+
+IST = pytz.timezone("Asia/Kolkata")
+
+def to_ist(dt):
+    """Convert a timezone-aware datetime to IST and return ISO 8601 string."""
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = pytz.utc.localize(dt)
+    return dt.astimezone(IST).isoformat()
+
 
 class SensitiveRateThrottle(SimpleRateThrottle):
     scope = 'sensitive'
@@ -165,18 +178,28 @@ def validateTeacher(request, *args, **kwargs):
     email = request.data.get("email")
     password = request.data.get("password")
 
-    if email is None or password is None:
+    if not email or not password:
         return Response(
             {"detail": "Email and Password are required"},
             status=status.HTTP_400_BAD_REQUEST,
         )
-    try:
 
-        teacher = Teacher.objects.get(email=email)
+    email = str(email).strip().lower()
+    password = str(password).strip()
+
+    try:
+        teacher = Teacher.objects.filter(email__iexact=email).first()
+        if not teacher:
+            return Response(
+                {"detail": "Invalid email or user not registered"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         if teacher.password_hash is None:
             return Response(
                 {"detail": "User not registered"}, status=status.HTTP_400_BAD_REQUEST
             )
+
         if not check_password(password, teacher.password_hash):
             return Response(
                 {"detail": "Invalid password"}, status=status.HTTP_400_BAD_REQUEST
@@ -195,11 +218,6 @@ def validateTeacher(request, *args, **kwargs):
                 },
                 status=status.HTTP_200_OK,
             )
-    except Teacher.DoesNotExist:
-        return Response(
-            {"detail": "Invalid email or user not registered"},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
     except Exception as e:
         traceback.print_exc()
         return Response(
@@ -464,7 +482,7 @@ def save_uploaded_photo_temp(photo):
     from django.conf import settings
     
     # Create media/pending_faces directory if it doesn't exist
-    pending_dir = os.path.join(settings.MEDIA_ROOT, 'pending_faces')
+    pending_dir = str(Path(settings.MEDIA_ROOT) / 'pending_faces')
     os.makedirs(pending_dir, exist_ok=True)
     
     # Create unique filename with UUID and preserve extension if possible
@@ -806,7 +824,7 @@ def get_student_subject_attendance(request, subject_id, *args, **kwargs):
                     "student_prn": record.student.prn,
                     "status": record.status,
                     "marked_at": record.marked_at.isoformat(),
-                    "class_datetime": record.class_session.class_datetime.isoformat(),
+                    "class_datetime": to_ist(record.class_session.class_datetime),
                     "division_id": record.student.division_id,
                 }
             )
@@ -888,14 +906,22 @@ def mark_attendance(request, *args, **kwargs):
         if daily_session:
             if daily_session.teacher_id != int(teacher_id):
                 daily_session.proxy_teacher_id = int(teacher_id)
-                daily_session.save(update_fields=['proxy_teacher'])
+                daily_session.save(update_fields=['proxy_teacher_id'])
 
+        department_obj = Department.objects.filter(name__iexact=departmentName).first()
+        if not department_obj and str(departmentName).isdigit():
+            department_obj = Department.objects.filter(id=int(departmentName)).first()
+        if not department_obj:
+            department_obj = Department.objects.first()
+
+        subject_obj = get_object_or_404(Subject, id=subject_id)
+        teacher_obj = get_object_or_404(Teacher, id=teacher_id)
 
         class_session = ClassSession.objects.create(
-            department = get_object_or_404(Department, name=departmentName),
+            department = department_obj,
             year = year,
-            subject = get_object_or_404(Subject, id=subject_id),
-            teacher = get_object_or_404(Teacher, id=teacher_id),
+            subject = subject_obj,
+            teacher = teacher_obj,
             class_datetime = timezone.now(),
         )
 
@@ -924,7 +950,7 @@ def mark_attendance(request, *args, **kwargs):
     
     except Exception as e:
         traceback.print_exc()
-        return Response({"error": "Failed to start attendance session."}, status=500)
+        return Response({"error": f"Failed to start attendance session: {str(e)}"}, status=500)
 
     # file_bytes = np.asarray(bytearray(photo.read()), dtype=np.uint8)
     # image = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
@@ -1125,7 +1151,7 @@ def teacher_class_sessions(request, *args, **kwargs):
                     "class_session_id": session.id,
                     "subject_name": session.subject.name,
                     "division_name": division_name or "All Divisions",
-                    "class_datetime": session.class_datetime.isoformat(),
+                    "class_datetime": to_ist(session.class_datetime),
                     "present_count": present_count,
                     "absent_count": absent_count,
                     "total_count": total_count,
