@@ -202,89 +202,84 @@ def initialize_firebase():
         else:
             print(f"Warning: Firebase credentials not found at {cred_path}")
 
-# def send_attendance_notifications(student_records, subject_name, class_datetime):
-#     """
-#     Send push notifications to all students with valid FCM tokens.
-#     """
-#     initialize_firebase()
-    
-#     if not firebase_admin._apps:
-#         print("Firebase not initialized, skipping notifications")
-#         return
-    
-#     for student, is_present in student_records:
-#         if student.notification_token:
-#             try:
-#                 status_text = "Present ✓" if is_present else "Absent ✗"
-#                 message = messaging.Message(
-#                     notification=messaging.Notification(
-#                         title=f"Attendance Marked - {subject_name}",
-#                         body=f"You were marked {status_text} for the class on {class_datetime.strftime('%d %b %Y, %I:%M %p')}",
-#                     ),
-#                     data={
-#                         "type": "attendance",
-#                         "subject": subject_name,
-#                         "status": "present" if is_present else "absent",
-#                         "datetime": class_datetime.isoformat(),
-#                     },
-#                     android=messaging.AndroidConfig(
-#                         priority="high",
-#                         notification=messaging.AndroidNotification(
-#                             channel_id="attendance_channel",
-#                             default_sound=True,
-#                         ),
-#                     ),
-#                     token=student.notification_token,
-#                 )
-#                 response = messaging.send(message)
-#                 print(f"Notification sent to {student.name}: {response}")
-#             except Exception as e:
-#                 print(f"Failed to send notification to {student.name}: {e}")
-
 def send_attendance_notifications(student_records, subject_name, class_datetime):
+    """
+    Send push notifications to all students with valid FCM tokens.
+    """
     initialize_firebase()
-
-    print("\n========== STUDENT NOTIFICATION DEBUG ==========")
-    print(f"Firebase apps initialized: {len(firebase_admin._apps) if firebase_admin else 0}")
-    print(f"Students to notify: {len(student_records)}")
-
+    
     if not firebase_admin._apps:
-        print("Firebase not initialized")
+        print("Firebase not initialized, skipping notifications")
         return
 
+    grouped_tokens = {
+        True: [],
+        False: [],
+    }
+    token_to_student = {}
+
     for student, is_present in student_records:
-        print("--------------------------------")
-        print(f"Student: {student.name}")
-        print(f"PRN: {student.prn}")
-        print(f"Token: {student.notification_token}")
-        print("========== BACKEND TOKEN ==========")
-        print(student.notification_token)
+        token = (student.notification_token or "").strip()
+        if token:
+            grouped_tokens[is_present].append(token)
+            token_to_student[token] = student
 
-        if student.notification_token:
-            try:
-                status_text = "Present ✓" if is_present else "Absent ✗"
+    for is_present, tokens in grouped_tokens.items():
+        if not tokens:
+            continue
 
-                message = messaging.Message(
-                    notification=messaging.Notification(
-                        title=f"Attendance Marked - {subject_name}",
-                        body=f"You were marked {status_text}",
+        status_value = "present" if is_present else "absent"
+        status_text = "Present" if is_present else "Absent"
+
+        for start in range(0, len(tokens), 500):
+            token_batch = tokens[start:start + 500]
+            message = messaging.MulticastMessage(
+                notification=messaging.Notification(
+                    title=f"Attendance Marked - {subject_name}",
+                    body=f"You were marked {status_text} for the class on {class_datetime.strftime('%d %b %Y, %I:%M %p')}",
+                ),
+                data={
+                    "type": "attendance",
+                    "subject": subject_name,
+                    "status": status_value,
+                    "datetime": class_datetime.isoformat(),
+                },
+                android=messaging.AndroidConfig(
+                    priority="high",
+                    notification=messaging.AndroidNotification(
+                        channel_id="attendance_channel",
+                        default_sound=True,
                     ),
-                    token=student.notification_token,
+                ),
+                tokens=token_batch,
+            )
+
+            try:
+                response = messaging.send_each_for_multicast(message)
+                print(
+                    f"Attendance notifications sent for {subject_name} ({status_value}): "
+                    f"{response.success_count} succeeded, {response.failure_count} failed"
                 )
 
-                response = messaging.send(message)
+                for idx, send_response in enumerate(response.responses):
+                    if send_response.success:
+                        continue
 
-                print("SUCCESS")
-                print(response)
+                    token = token_batch[idx]
+                    student = token_to_student.get(token)
+                    error_code = getattr(send_response.exception, "code", "")
+                    print(
+                        f"Failed to send attendance notification to "
+                        f"{student.name if student else 'unknown student'}: {send_response.exception}"
+                    )
 
+                    if error_code in {"registration-token-not-registered", "invalid-registration-token"} and student:
+                        Student.objects.filter(
+                            id=student.id,
+                            notification_token=token,
+                        ).update(notification_token=None)
             except Exception as e:
-                print("FAILED")
-                print(type(e).__name__)
-                print(e)
-        else:
-            print("Student has no notification token")
-
-    print("========== END DEBUG ==========\n")
+                print(f"Failed to send attendance notification batch for {subject_name} ({status_value}): {e}")
 
 def send_student_registration_notification(student, is_success, message_body):
     """
