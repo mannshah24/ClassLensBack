@@ -1,5 +1,6 @@
 from celery import shared_task
 import os
+from pathlib import Path
 from rest_framework.response import Response
 import uuid
 from django.conf import settings
@@ -9,6 +10,7 @@ import numpy as np
 from scipy.spatial.distance import cosine
 import json
 import sys, types
+from django.db import transaction, models
 from django.db.models import F as DbF
 
 
@@ -98,7 +100,7 @@ def get_restorer():
             model_path = _settings.GFPGAN_MODEL_PATH
         else:
             # default to BASE_DIR/GFPGANv1.4.pth
-            model_path = str(_settings.BASE_DIR / 'GFPGANv1.4.pth')
+            model_path = str(Path(_settings.BASE_DIR) / 'GFPGANv1.4.pth')
     except Exception:
         model_path = 'GFPGANv1.4.pth'
 
@@ -194,7 +196,7 @@ def initialize_firebase():
         return
 
     if not firebase_admin._apps:
-        cred_path = os.path.join(settings.BASE_DIR, 'firebase-service-account.json')
+        cred_path = str(Path(settings.BASE_DIR) / 'firebase-service-account.json')
         if os.path.exists(cred_path):
             cred = credentials.Certificate(cred_path)
             firebase_admin.initialize_app(cred)
@@ -207,9 +209,13 @@ def send_attendance_notifications(student_records, subject_name, class_datetime)
     Send push notifications to all students with valid FCM tokens.
     """
     initialize_firebase()
-    
-    if not firebase_admin._apps:
-        print("Firebase not initialized, skipping notifications")
+
+    print("\n========== STUDENT NOTIFICATION DEBUG ==========")
+    print(f"Firebase apps initialized: {len(firebase_admin._apps) if firebase_admin else 0}")
+    print(f"Students to notify: {len(student_records)}")
+
+    if firebase_admin is None or not firebase_admin._apps:
+        print("Firebase not initialized")
         return
 
     grouped_tokens = {
@@ -219,67 +225,50 @@ def send_attendance_notifications(student_records, subject_name, class_datetime)
     token_to_student = {}
 
     for student, is_present in student_records:
-        token = (student.notification_token or "").strip()
-        if token:
-            grouped_tokens[is_present].append(token)
-            token_to_student[token] = student
-
-    for is_present, tokens in grouped_tokens.items():
-        if not tokens:
+        if not student.notification_token:
+            print(f"Student {student.name} ({student.prn}) has no notification token")
             continue
 
-        status_value = "present" if is_present else "absent"
-        status_text = "Present" if is_present else "Absent"
+        status_text = "Present ✓" if is_present else "Absent ✗"
 
-        for start in range(0, len(tokens), 500):
-            token_batch = tokens[start:start + 500]
-            message = messaging.MulticastMessage(
-                notification=messaging.Notification(
-                    title=f"Attendance Marked - {subject_name}",
-                    body=f"You were marked {status_text} for the class on {class_datetime.strftime('%d %b %Y, %I:%M %p')}",
+        message = messaging.Message(
+            notification=messaging.Notification(
+                title=f"Attendance Marked - {subject_name}",
+                body=f"You were marked {status_text}",
+            ),
+            data={
+                "type": "student_attendance",
+                "status": "present" if is_present else "absent",
+                "subject": str(subject_name),
+                "datetime": class_datetime.isoformat() if class_datetime else "",
+            },
+            android=messaging.AndroidConfig(
+                priority="high",
+                notification=messaging.AndroidNotification(
+                    channel_id="attendance_channel",
+                    default_sound=True,
                 ),
-                data={
-                    "type": "attendance",
-                    "subject": subject_name,
-                    "status": status_value,
-                    "datetime": class_datetime.isoformat(),
-                },
-                android=messaging.AndroidConfig(
-                    priority="high",
-                    notification=messaging.AndroidNotification(
-                        channel_id="attendance_channel",
-                        default_sound=True,
-                    ),
+            ),
+            apns=messaging.APNSConfig(
+                payload=messaging.APNSPayload(
+                    aps=messaging.Aps(content_available=True, sound="default")
                 ),
-                tokens=token_batch,
-            )
+                headers={"apns-priority": "10"},
+            ),
+            token=student.notification_token,
+        )
 
-            try:
-                response = messaging.send_each_for_multicast(message)
-                print(
-                    f"Attendance notifications sent for {subject_name} ({status_value}): "
-                    f"{response.success_count} succeeded, {response.failure_count} failed"
-                )
+        try:
+            response = messaging.send(message)
+            print(f"SUCCESS sending to {student.name} ({student.prn}): {response}")
+        except messaging.UnregisteredError:
+            print(f"Unregistered FCM token for {student.name}, clearing token from DB...")
+            student.notification_token = None
+            student.save(update_fields=["notification_token"])
+        except Exception as e:
+            print(f"FAILED sending to {student.name}: {type(e).__name__} - {e}")
 
-                for idx, send_response in enumerate(response.responses):
-                    if send_response.success:
-                        continue
-
-                    token = token_batch[idx]
-                    student = token_to_student.get(token)
-                    error_code = getattr(send_response.exception, "code", "")
-                    print(
-                        f"Failed to send attendance notification to "
-                        f"{student.name if student else 'unknown student'}: {send_response.exception}"
-                    )
-
-                    if error_code in {"registration-token-not-registered", "invalid-registration-token"} and student:
-                        Student.objects.filter(
-                            id=student.id,
-                            notification_token=token,
-                        ).update(notification_token=None)
-            except Exception as e:
-                print(f"Failed to send attendance notification batch for {subject_name} ({status_value}): {e}")
+    print("========== END DEBUG ==========\n")
 
 def send_student_registration_notification(student, is_success, message_body):
     """
@@ -310,10 +299,20 @@ def send_student_registration_notification(student, is_success, message_body):
                         default_sound=True,
                     ),
                 ),
+                apns=messaging.APNSConfig(
+                    payload=messaging.APNSPayload(
+                        aps=messaging.Aps(content_available=True, sound="default")
+                    ),
+                    headers={"apns-priority": "10"},
+                ),
                 token=student.notification_token,
             )
             response = messaging.send(message)
             print(f"Notification sent to student {student.name}: {response}")
+        except messaging.UnregisteredError:
+            print(f"Unregistered FCM token for student {student.name}, clearing token...")
+            student.notification_token = None
+            student.save(update_fields=["notification_token"])
         except Exception as e:
             print(f"Failed to send notification to student {student.name}: {e}")
 
@@ -344,7 +343,7 @@ def send_teacher_attendance_notification(teacher_token, is_success, subject_name
                 data={
                     "type": "teacher_attendance",
                     "status": "success" if is_success else "failure",
-                    "subject": subject_name,
+                    "subject": str(subject_name),
                 },
                 android=messaging.AndroidConfig(
                     priority="high",
@@ -352,6 +351,12 @@ def send_teacher_attendance_notification(teacher_token, is_success, subject_name
                         channel_id="attendance_channel",
                         default_sound=True,
                     ),
+                ),
+                apns=messaging.APNSConfig(
+                    payload=messaging.APNSPayload(
+                        aps=messaging.Aps(content_available=True, sound="default")
+                    ),
+                    headers={"apns-priority": "10"},
                 ),
                 token=teacher_token,
             )
@@ -465,11 +470,12 @@ def evaluate_attendance(total_sessions, class_session_id: int, scheme, host, div
 
     all_students_qs = Student.objects.filter(
         prn__in=enrolled_prns_qs,
-        year=session.year,
         department=session.department,
     )
     if division_id:
         all_students_qs = all_students_qs.filter(division_id=division_id)
+    elif session.year:
+        all_students_qs = all_students_qs.filter(year=session.year)
 
     enrolled_prns = list(all_students_qs.values_list('prn', flat=True))
     
@@ -484,7 +490,7 @@ def evaluate_attendance(total_sessions, class_session_id: int, scheme, host, div
             known_embeddings[s.prn] = emb
 
     present_student_prns = set()
-    output_dir = settings.MEDIA_ROOT / 'detected_photos'
+    output_dir = Path(settings.MEDIA_ROOT) / 'detected_photos'
     output_dir.mkdir(parents=True, exist_ok=True)
 
     for img_obj in images:
@@ -627,14 +633,28 @@ def evaluate_attendance(total_sessions, class_session_id: int, scheme, host, div
     )
     print(f"images url {image_urls[0] if image_urls else None}")
 
+    present_count = len(present_student_prns)
+    absent_count = len(enrolled_prns) - len(present_student_prns)
+
+    # Notify teacher — done inline so it fires exactly once (never duplicated by signals)
+    teacher_token = session.teacher.notification_token if session.teacher else None
+    if teacher_token:
+        send_teacher_attendance_notification(
+            teacher_token=teacher_token,
+            is_success=True,
+            subject_name=session.subject.name,
+            present_count=present_count,
+            absent_count=absent_count,
+        )
+
     return {
         "num_faces": total_faces,
         "image_url": image_urls[0] if image_urls else None,
         "image_urls": image_urls,
         "class_session_id": class_session_id,
         "division_id": division_id,
-        "present_count": len(present_student_prns),
-        "absent_count": len(enrolled_prns) - len(present_student_prns),
+        "present_count": present_count,
+        "absent_count": absent_count,
         "subject": session.subject.name
     }
 
@@ -675,7 +695,7 @@ def evaluate_additional_attendance(class_session_id: int, new_photo_ids: list, s
             known_embeddings[s.prn] = emb
             
     present_student_prns = set()
-    output_dir = settings.MEDIA_ROOT / 'detected_photos'
+    output_dir = Path(settings.MEDIA_ROOT) / 'detected_photos'
     output_dir.mkdir(parents=True, exist_ok=True)
     
     total_faces = 0
@@ -806,17 +826,18 @@ def evaluate_additional_attendance(class_session_id: int, new_photo_ids: list, s
             session.class_datetime
         )
         
-    final_present_count = AttendanceRecord.objects.filter(class_session=session, status=True).count()
-    final_absent_count = AttendanceRecord.objects.filter(class_session=session, status=False).count()
-    
+    # No teacher notification here — evaluate_additional_attendance only notifies
+    # students who were newly found present. The teacher was already notified when
+    # the initial evaluate_attendance task completed.
+
     return {
         "num_faces": total_faces,
         "image_url": image_urls[0] if image_urls else None,
         "image_urls": image_urls,
         "class_session_id": class_session_id,
         "division_id": division_id,
-        "present_count": final_present_count,
-        "absent_count": final_absent_count,
+        "present_count": AttendanceRecord.objects.filter(class_session=session, status=True).count(),
+        "absent_count": AttendanceRecord.objects.filter(class_session=session, status=False).count(),
         "newly_marked_present_count": len(present_student_prns),
         "subject": session.subject.name
     }
@@ -825,7 +846,6 @@ def evaluate_additional_attendance(class_session_id: int, new_photo_ids: list, s
 @shared_task
 def generate_daily_sessions(for_date_str=None, division_id=None):
     from datetime import date
-    from django.db import transaction
     from .models import TimetableTemplate, DailySession, Holiday, Division
     from collections import defaultdict
 
@@ -1068,42 +1088,11 @@ def process_student_face_embedding(student_prn, temp_image_path, is_registration
         send_student_registration_notification(student, is_success=False, message_body=notify_msg)
         raise e
 
-from celery.signals import task_failure, task_success
-
-@task_failure.connect
-def on_task_failure(sender, task_id, exception, args, kwargs, traceback, einfo, **extra_kwargs):
-    if sender.name in ['Home.tasks.evaluate_attendance', 'Home.tasks.evaluate_additional_attendance']:
-        try:
-            class_session_id = args[1] if sender.name == 'Home.tasks.evaluate_attendance' else args[0]
-            session = ClassSession.objects.get(id=class_session_id)
-            teacher_token = session.teacher.notification_token
-            if teacher_token:
-                send_teacher_attendance_notification(
-                    teacher_token=teacher_token,
-                    is_success=False,
-                    subject_name=session.subject.name,
-                    error_message="Attendance processing failed. Please try resubmitting."
-                )
-        except Exception as e:
-            print(f"Error in failure signal handler: {e}")
-
-@task_success.connect
-def on_task_success(sender, result, **kwargs):
-    if sender.name in ['Home.tasks.evaluate_attendance', 'Home.tasks.evaluate_additional_attendance']:
-        try:
-            class_session_id = result.get("class_session_id")
-            session = ClassSession.objects.get(id=class_session_id)
-            teacher_token = session.teacher.notification_token
-            if teacher_token:
-                send_teacher_attendance_notification(
-                    teacher_token=teacher_token,
-                    is_success=True,
-                    subject_name=session.subject.name,
-                    present_count=result.get("present_count", 0),
-                    absent_count=result.get("absent_count", 0)
-                )
-        except Exception as e:
-            print(f"Error in success signal handler: {e}")
+# Teacher notification is now sent directly inside each task body (evaluate_attendance
+# and evaluate_additional_attendance), so no Celery success/failure signal handlers
+# are needed here. Removing them eliminates the duplicate-notification bug that
+# occurred when tasks.py was imported more than once, causing signals to be
+# registered multiple times despite dispatch_uid.
 
 @shared_task(name="Home.tasks.log_normal_task")
 def log_normal_task(module, action, actor_id=None, actor_email=None, request_path="", ip_address=None, summary=""):
@@ -1147,7 +1136,7 @@ def cleanup_old_logs(days_to_keep=180):
 
 from celery.signals import task_postrun
 
-@task_postrun.connect
+@task_postrun.connect(dispatch_uid="on_task_postrun_db_logger")
 def on_task_postrun(sender, task_id, task, args, kwargs, retval, state, **extra_kwargs):
     if sender.name in ['Home.tasks.log_normal_task', 'Home.tasks.log_error_task', 'Home.tasks.cleanup_old_logs']:
         return

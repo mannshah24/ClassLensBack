@@ -1,0 +1,22 @@
+{
+  "venvPath": ".",
+  "venv": ".venv",
+  "extraPaths": [
+    "./ClassLens_DB"
+  ],
+  "typeCheckingMode": "off",
+  "reportMissingTypeStubs": "none",
+  "reportMissingImports": "none",
+  "reportAttributeAccessIssue": "none",
+  "reportGeneralTypeIssues": "none",
+  "reportOperatorIssue": "none",
+  "reportArgumentType": "none",
+  "reportOptionalOperand": "none",
+  "reportOptionalMemberAccess": "none",
+  "reportCallIssue": "none",
+  "reportUnknownMemberType": "none",
+  "reportUnknownArgumentType": "none",
+  "reportUnknownVariableType": "none",
+  "reportUntypedFunctionDecorator": "none",
+  "reportPrivateImportUsage": "none"
+}
