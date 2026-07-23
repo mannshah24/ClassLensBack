@@ -204,46 +204,10 @@ def initialize_firebase():
         else:
             print(f"Warning: Firebase credentials not found at {cred_path}")
 
-# def send_attendance_notifications(student_records, subject_name, class_datetime):
-#     """
-#     Send push notifications to all students with valid FCM tokens.
-#     """
-#     initialize_firebase()
-    
-#     if not firebase_admin._apps:
-#         print("Firebase not initialized, skipping notifications")
-#         return
-    
-#     for student, is_present in student_records:
-#         if student.notification_token:
-#             try:
-#                 status_text = "Present ✓" if is_present else "Absent ✗"
-#                 message = messaging.Message(
-#                     notification=messaging.Notification(
-#                         title=f"Attendance Marked - {subject_name}",
-#                         body=f"You were marked {status_text} for the class on {class_datetime.strftime('%d %b %Y, %I:%M %p')}",
-#                     ),
-#                     data={
-#                         "type": "attendance",
-#                         "subject": subject_name,
-#                         "status": "present" if is_present else "absent",
-#                         "datetime": class_datetime.isoformat(),
-#                     },
-#                     android=messaging.AndroidConfig(
-#                         priority="high",
-#                         notification=messaging.AndroidNotification(
-#                             channel_id="attendance_channel",
-#                             default_sound=True,
-#                         ),
-#                     ),
-#                     token=student.notification_token,
-#                 )
-#                 response = messaging.send(message)
-#                 print(f"Notification sent to {student.name}: {response}")
-#             except Exception as e:
-#                 print(f"Failed to send notification to {student.name}: {e}")
-
 def send_attendance_notifications(student_records, subject_name, class_datetime):
+    """
+    Send push notifications to all students with valid FCM tokens.
+    """
     initialize_firebase()
 
     print("\n========== STUDENT NOTIFICATION DEBUG ==========")
@@ -253,6 +217,12 @@ def send_attendance_notifications(student_records, subject_name, class_datetime)
     if firebase_admin is None or not firebase_admin._apps:
         print("Firebase not initialized")
         return
+
+    grouped_tokens = {
+        True: [],
+        False: [],
+    }
+    token_to_student = {}
 
     for student, is_present in student_records:
         if not student.notification_token:
